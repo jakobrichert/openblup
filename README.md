@@ -262,17 +262,27 @@ The algorithms implemented here are based on well-established quantitative genet
 
 ## Contributing
 
-Contributions are welcome! This project is in active development. Areas where help is especially valuable:
+Contributions are welcome! See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the full guide, including:
 
-- **Validation**: Comparing results against ASReml/sommer on real datasets
-- **Genomic features**: G-matrix, ssGBLUP, marker effects
-- **Spatial models**: AR1, AR1xAR1, spline-based
-- **Python bindings**: PyO3 integration, pandas/numpy interop
-- **Documentation**: Tutorials, worked examples from breeding programs
+- How to set up your development environment
+- Code style and naming conventions (follows standard QG notation)
+- Testing requirements (all new algorithms must be validated)
+- Pull request process and templates
+
+**Areas where help is especially valuable:**
+
+| Area | What's Needed |
+|------|---------------|
+| **Validation** | Run the same model in OpenBLUP + ASReml/sommer, compare variance components and BLUPs |
+| **Factor Analytic** | FA1/FA2 variance structures for multi-environment trial analysis |
+| **Tutorials** | Worked examples from real breeding programs (dairy, wheat, maize, forestry) |
+| **Python polish** | pandas DataFrame input, better error messages, documentation |
+
+Even if you don't write code — validation reports, bug reports, and feature requests are extremely valuable. See our [issue templates](.github/ISSUE_TEMPLATE/).
 
 ## Licence
 
-MIT OR Apache-2.0 (dual-licensed)
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option.
 
 ## Acknowledgements
 
