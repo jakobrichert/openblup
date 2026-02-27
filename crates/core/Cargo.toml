@@ -1,0 +1,22 @@
+[package]
+name = "plant-breeding-lmm-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "ASReml-like linear mixed model library for plant breeding"
+
+[dependencies]
+nalgebra = { workspace = true }
+faer = { workspace = true }
+sprs = { workspace = true }
+csv = { workspace = true }
+serde = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+indexmap = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }
+rand = { workspace = true }

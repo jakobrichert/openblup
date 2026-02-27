@@ -1,0 +1,12 @@
+[package]
+name = "plant-breeding-lmm-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+plant-breeding-lmm-core = { path = "../core" }
+clap = { workspace = true }
+anyhow = { workspace = true }
+env_logger = { workspace = true }
