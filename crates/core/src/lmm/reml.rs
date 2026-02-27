@@ -16,12 +16,12 @@ use super::result::{
 ///
 /// where e_hat = y - X*b_hat - Z*u_hat and C^{-1} is the inverse of the
 /// MME coefficient matrix.
-pub struct AiReml {
+pub struct EmReml {
     max_iter: usize,
     tol: f64,
 }
 
-impl AiReml {
+impl EmReml {
     pub fn new(max_iter: usize, tol: f64) -> Self {
         Self { max_iter, tol }
     }

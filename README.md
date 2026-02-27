@@ -20,29 +20,61 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 
 ## Features
 
-### Implemented (Phase 1-2)
-
-- **REML variance component estimation** via EM-REML algorithm
-- **Henderson's Mixed Model Equations** (MME) assembly and solve
+### Core Engine
+- **AI-REML** (Average Information) with quadratic convergence + EM-REML fallback
+- **Henderson's Mixed Model Equations** (MME) — dense and sparse assembly/solve
 - **BLUP/BLUE** extraction with standard errors
-- **Pedigree BLUP (Animal Model)**
-  - Pedigree parsing and validation (CSV, programmatic)
-  - Henderson's A-inverse with Meuwissen & Luo (1992) inbreeding
-  - Topological sort for correct pedigree ordering
-- **Sparse Cholesky solver** via [faer](https://github.com/sarah-ek/faer-rs) (supernodal, with symbolic/numeric split)
-- **Flexible model specification** with builder pattern API
-- **Data I/O**: CSV import with automatic type detection (numeric vs. categorical)
+- **Sparse Cholesky solver** via [faer](https://github.com/sarah-ek/faer-rs) (supernodal, symbolic/numeric split)
+- **Wald F-tests** for fixed effects with p-values
 - **Diagnostics**: Log-likelihood, AIC, BIC, convergence monitoring
 
-### Planned
+### Pedigree BLUP (Animal Model)
+- Pedigree parsing and validation (CSV, programmatic)
+- Henderson's A-inverse with Meuwissen & Luo (1992) inbreeding
+- Topological sort for correct pedigree ordering
+- Validated against Mrode (2005) textbook examples
 
-- **Genomic BLUP (GBLUP)**: VanRaden (2008) G-matrix, single-step H-matrix (Legarra et al. 2009)
-- **Spatial analysis**: AR1, AR1xAR1 field trial models
-- **Multi-trait models**: Unstructured, diagonal, compound symmetry covariance
-- **Factor analytic structures**: For multi-environment trial analysis
-- **AI-REML**: Average Information REML for faster convergence
-- **Python bindings**: Full PyO3/maturin integration with numpy/scipy interop
-- **CLI tool**: Command-line interface for batch analyses
+### Genomic BLUP (GBLUP)
+- VanRaden Method 1 (2008) G-matrix construction
+- G-matrix blending with A22 (Misztal et al. 2010)
+- Single-step H-inverse (Legarra et al. 2009, Aguilar et al. 2010)
+- Full A-matrix computation and A22 extraction
+
+### Spatial & Variance Structures
+- **AR1** (first-order autoregressive) with closed-form tridiagonal inverse
+- **Kronecker product** for separable spatial models (AR1 x AR1)
+- **Diagonal** (heterogeneous variances)
+- **Unstructured** covariance (Cholesky parameterized)
+- **Identity** (IID random effects)
+
+### Multi-trait Models
+- Kronecker-structured MME for correlated traits
+- EM-REML for trait covariance estimation (G0, R0)
+- Genetic correlation estimation
+- Positive-definiteness enforcement via eigenvalue bending
+
+### Python Bindings (PyO3)
+- `MixedModel` class with fluent API
+- `Pedigree` class with CSV import and A-inverse
+- `compute_g_matrix()` from numpy marker arrays
+- scipy.sparse interop for relationship matrices
+- Full type stubs for IDE autocompletion
+- Install via `pip install -e .` (maturin)
+
+### CLI Tool
+- `openblup fit` — fit models from CSV with formula specification
+- `openblup ainverse` — compute and inspect A-inverse from pedigree
+- Text and JSON output formats
+
+### Data I/O
+- CSV import with automatic type detection (numeric vs. categorical)
+- Flexible model specification with builder pattern API
+
+### Planned
+- Factor analytic variance structures (for MET analysis)
+- Satterthwaite/Kenward-Roger denominator degrees of freedom
+- Residual diagnostics (conditional, marginal)
+- Selection indices (Smith-Hazel)
 
 ## Quick Start (Rust)
 
@@ -81,35 +113,86 @@ let result = model.fit_reml()?;
 println!("{}", result.summary());
 ```
 
+## Quick Start (Python)
+
+```bash
+# Install (requires Rust toolchain + maturin)
+pip install maturin
+pip install -e .
+```
+
+```python
+from plant_breeding_lmm import MixedModel, Pedigree, compute_a_inverse
+
+# Fit a simple mixed model
+model = MixedModel()
+model.load_csv("field_trial.csv")
+model.set_response("yield")
+model.add_fixed("rep")
+model.add_random("genotype")
+result = model.fit()
+print(result.summary())
+
+# With pedigree relationship matrix
+ped = Pedigree.from_csv("pedigree.csv")
+a_inv = compute_a_inverse(ped)  # scipy.sparse compatible
+
+model = MixedModel()
+model.load_csv("field_trial.csv")
+model.set_response("yield")
+model.add_fixed("rep")
+model.add_random("animal", ginverse=a_inv)
+result = model.fit()
+print(result.variance_components())  # {'animal': 20.5, 'residual': 40.1}
+```
+
+## Quick Start (CLI)
+
+```bash
+# Fit a model from the command line
+openblup fit --data trial.csv --response yield --fixed "rep" --random genotype
+
+# With pedigree
+openblup fit --data trial.csv --response yield --fixed "rep" \
+    --random animal --pedigree pedigree.csv
+
+# Inspect A-inverse
+openblup ainverse --pedigree pedigree.csv
+```
+
 ## Building
 
 ```bash
 # Requires Rust 1.70+ (tested with 1.93)
 cargo build --release
 
-# Run tests
+# Run tests (214 tests)
 cargo test --workspace
 
-# Run benchmarks (coming soon)
-cargo bench
+# Build Python bindings
+pip install maturin
+maturin develop --release
+
+# Build CLI
+cargo build --release -p openblup-cli
 ```
 
 ## Architecture
 
 ```
-plant-breeding-lmm/
+openblup/
 ├── crates/
-│   ├── core/                 # Pure Rust library
+│   ├── core/                 # Pure Rust library (13,000+ lines)
 │   │   ├── data/             # DataFrame, Factor columns, CSV I/O
 │   │   ├── matrix/           # Sparse ops, dense helpers, faer Cholesky
-│   │   ├── model/            # Builder API, design matrix construction
-│   │   ├── lmm/              # MME assembly, EM-REML, BLUP/BLUE
-│   │   ├── variance/         # VarStruct trait + implementations
-│   │   ├── genetics/         # Pedigree, A-inverse, (G-matrix, H-matrix)
-│   │   └── diagnostics/      # LogL, AIC/BIC, convergence
-│   ├── python-bindings/      # PyO3 bridge (planned)
-│   └── cli/                  # Command-line tool (planned)
-└── python/                   # Python package
+│   │   ├── model/            # Builder API, design matrices, multi-trait
+│   │   ├── lmm/              # MME, AI-REML, EM-REML, BLUP/BLUE
+│   │   ├── variance/         # AR1, Diagonal, Unstructured, Kronecker
+│   │   ├── genetics/         # Pedigree, A/G/H matrices, breeding values
+│   │   └── diagnostics/      # LogL, AIC/BIC, Wald tests, convergence
+│   ├── python-bindings/      # PyO3 bridge with numpy/scipy interop
+│   └── cli/                  # Command-line tool (clap)
+└── python/                   # Python package + type stubs
 ```
 
 ## Algorithms & References
@@ -151,14 +234,18 @@ The algorithms implemented here are based on well-established quantitative genet
 |---------|--------|------------|-----------------|----------------------|
 | Language | Fortran | R | Julia | **Rust + Python** |
 | Open source | No | Yes | Yes | **Yes** |
+| AI-REML | Yes | No | No | **Yes** |
 | Pedigree BLUP | Yes | Yes | No | **Yes** |
-| Genomic BLUP | Yes | Yes | No | **Planned** |
-| Spatial (AR1xAR1) | Yes | Yes | No | **Planned** |
-| Multi-trait | Yes | Yes | Yes | **Planned** |
-| Factor analytic | Yes | Limited | No | **Planned** |
+| Genomic BLUP | Yes | Yes | No | **Yes** |
+| Single-step (H) | Yes | Yes | No | **Yes** |
+| Spatial (AR1xAR1) | Yes | Yes | No | **Yes** |
+| Multi-trait | Yes | Yes | Yes | **Yes** |
+| Factor analytic | Yes | Limited | No | Planned |
 | Sparse solver | Yes | No | Yes | **Yes (faer)** |
-| Python API | No | No | No | **Planned** |
-| WebAssembly target | No | No | No | **Possible** |
+| Python API | No | No | No | **Yes (PyO3)** |
+| CLI tool | Yes | No | No | **Yes** |
+| Wald tests | Yes | Yes | Yes | **Yes** |
+| WebAssembly target | No | No | No | Possible |
 | Memory safe | No | N/A | Yes (GC) | **Yes (ownership)** |
 | Performance | Excellent | Slow | Good | **Excellent** |
 

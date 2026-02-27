@@ -6,10 +6,12 @@ license.workspace = true
 authors.workspace = true
 
 [lib]
-name = "_internal"
+name = "openblup"
 crate-type = ["cdylib"]
 
 [dependencies]
-plant-breeding-lmm-core = { path = "../core" }
 pyo3 = { workspace = true }
 numpy = { workspace = true }
+plant-breeding-lmm-core = { path = "../core" }
+nalgebra = { workspace = true }
+sprs = { workspace = true }
