@@ -70,11 +70,22 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 - CSV import with automatic type detection (numeric vs. categorical)
 - Flexible model specification with builder pattern API
 
-### Planned
-- Factor analytic variance structures (for MET analysis)
-- Satterthwaite/Kenward-Roger denominator degrees of freedom
-- Residual diagnostics (conditional, marginal)
-- Selection indices (Smith-Hazel)
+### Roadmap
+
+These features are planned for future releases, roughly in priority order:
+
+| Feature | Description | Complexity |
+|---------|-------------|------------|
+| **Factor Analytic (FA) models** | Reduced-rank covariance for multi-environment trials (MET). FA1, FA2, etc. Dramatically reduces the number of parameters for large MET analyses (Smith et al. 2001, Thompson et al. 2003). | High |
+| **Structured R (spatial residuals)** | Extend REML to support non-identity residual structures (e.g., AR1xAR1 residual in field trials). Currently R = σ²I; this would allow R = σ² (Σ_row ⊗ Σ_col). | Medium |
+| **Satterthwaite / Kenward-Roger df** | Improved denominator degrees of freedom for Wald F-tests. Currently uses the containment method; Kenward-Roger is more accurate for unbalanced designs. | Medium |
+| **Residual diagnostics** | Conditional and marginal residuals, leverage, Cook's distance, QQ plots. Essential for model checking in practice. | Medium |
+| **Selection indices** | Smith-Hazel index, economic weights, index coefficients. Used in multi-trait selection to combine breeding values into a single selection criterion. | Low |
+| **Marker effect models (RR-BLUP)** | Ridge regression BLUP for estimating individual SNP marker effects rather than genomic breeding values. Useful for genomic prediction and QTL mapping. | Medium |
+| **Cross-validation** | k-fold CV for assessing genomic prediction accuracy. Widely used to compare models and training population designs. | Low |
+| **Sparse inverse subset** | Compute only the diagonal (or selected elements) of C⁻¹ using Takahashi equations, avoiding full dense inversion. Critical for scaling to >10,000 animals. | High |
+| **GPU acceleration** | CUDA/ROCm support for G-matrix computation and dense linear algebra on large genomic datasets. | High |
+| **WASM target** | Compile to WebAssembly for browser-based breeding value estimation. Useful for education and lightweight field tools. | Low |
 
 ## Quick Start (Rust)
 
