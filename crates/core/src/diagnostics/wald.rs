@@ -146,7 +146,7 @@ pub fn wald_tests(result: &FitResult) -> Vec<WaldTest> {
 ///
 /// The incomplete beta function is computed using a continued fraction
 /// expansion (Lentz's algorithm).
-fn f_distribution_sf(x: f64, d1: f64, d2: f64) -> f64 {
+pub(crate) fn f_distribution_sf(x: f64, d1: f64, d2: f64) -> f64 {
     if x <= 0.0 || d1 <= 0.0 || d2 <= 0.0 {
         return 1.0;
     }

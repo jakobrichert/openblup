@@ -2,6 +2,7 @@ pub mod data;
 pub mod diagnostics;
 pub mod error;
 pub mod genetics;
+pub mod gpu;
 pub mod lmm;
 pub mod matrix;
 pub mod model;

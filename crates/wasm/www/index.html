@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenBLUP - Browser-Based Breeding Value Estimation</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: system-ui, -apple-system, sans-serif; max-width: 960px; margin: 0 auto; padding: 2rem; color: #1e293b; line-height: 1.6; }
+        h1 { font-size: 2rem; margin-bottom: 0.5rem; }
+        h1 span { color: #2563eb; }
+        .subtitle { color: #64748b; margin-bottom: 2rem; }
+        h2 { font-size: 1.25rem; margin-bottom: 1rem; color: #334155; }
+        .panel { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.5rem; margin: 1.5rem 0; }
+        label { display: block; font-weight: 600; margin-bottom: 0.25rem; font-size: 0.9rem; }
+        textarea { width: 100%; height: 120px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.85rem; border: 1px solid #cbd5e1; border-radius: 4px; padding: 0.75rem; resize: vertical; }
+        button { background: #2563eb; color: white; border: none; padding: 0.6rem 1.5rem; border-radius: 6px; cursor: pointer; font-size: 0.95rem; font-weight: 500; margin-top: 0.75rem; }
+        button:hover { background: #1d4ed8; }
+        button:active { transform: translateY(1px); }
+        pre { background: #1e293b; color: #e2e8f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; margin-top: 1rem; min-height: 80px; white-space: pre-wrap; }
+        .note { font-size: 0.8rem; color: #94a3b8; margin-top: 0.5rem; }
+        footer { margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid #e2e8f0; color: #94a3b8; font-size: 0.85rem; }
+        footer a { color: #2563eb; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <h1>Open<span>BLUP</span></h1>
+    <p class="subtitle">Browser-based breeding value estimation powered by Rust + WebAssembly</p>
+
+    <div class="panel">
+        <h2>Pedigree A-inverse</h2>
+        <label>Pedigree (JSON array: animal, sire, dam):</label>
+        <textarea id="pedigree">[
+  {"animal": "1", "sire": "0", "dam": "0"},
+  {"animal": "2", "sire": "0", "dam": "0"},
+  {"animal": "3", "sire": "1", "dam": "2"},
+  {"animal": "4", "sire": "1", "dam": "2"},
+  {"animal": "5", "sire": "3", "dam": "4"}
+]</textarea>
+        <button onclick="computeAInverse()">Compute A-inverse</button>
+        <pre id="ainv-result">Results will appear here...</pre>
+    </div>
+
+    <div class="panel">
+        <h2>Simple Mixed Model</h2>
+        <label>Model (JSON: y, X, Z, ginv):</label>
+        <textarea id="model" style="height: 160px">{
+  "y": [10.0, 12.0, 8.0, 6.0, 11.0, 9.0],
+  "x": [[1.0], [1.0], [1.0], [1.0], [1.0], [1.0]],
+  "z": [[1,0,0],[1,0,0],[0,1,0],[0,1,0],[0,0,1],[0,0,1]],
+  "ginv": null
+}</textarea>
+        <button onclick="fitModel()">Fit Model (EM-REML)</button>
+        <pre id="model-result">Results will appear here...</pre>
+    </div>
+
+    <div class="panel">
+        <h2>G-Matrix Calculator</h2>
+        <label>Marker data (space-separated 0/1/2 matrix, one individual per line):</label>
+        <textarea id="markers">0 1 2 1 0 2 1 0
+2 1 0 1 2 0 1 2
+1 1 1 1 1 1 1 1
+0 2 1 0 1 2 0 1</textarea>
+        <button onclick="computeGMatrix()">Compute G-Matrix</button>
+        <pre id="gmatrix-result">Results will appear here...</pre>
+        <p class="note">VanRaden Method 1: G = ZZ' / (2 * sum(p*q))</p>
+    </div>
+
+    <footer>
+        <p>OpenBLUP &mdash; Open-source linear mixed models for plant and animal breeding.</p>
+        <p><a href="https://github.com/jakobrichert/openblup">GitHub</a> | MIT / Apache 2.0</p>
+    </footer>
+
+    <script>
+        // These functions would connect to the WASM module when compiled.
+        // For now, show placeholder messages.
+        function computeAInverse() {
+            document.getElementById('ainv-result').textContent =
+                'To use this demo, compile with wasm-pack:\n\n' +
+                '  cd crates/wasm && wasm-pack build --target web\n\n' +
+                'Then serve this directory with a web server.';
+        }
+        function fitModel() {
+            document.getElementById('model-result').textContent =
+                'To use this demo, compile with wasm-pack:\n\n' +
+                '  cd crates/wasm && wasm-pack build --target web\n\n' +
+                'Then serve this directory with a web server.';
+        }
+        function computeGMatrix() {
+            document.getElementById('gmatrix-result').textContent =
+                'To use this demo, compile with wasm-pack:\n\n' +
+                '  cd crates/wasm && wasm-pack build --target web\n\n' +
+                'Then serve this directory with a web server.';
+        }
+    </script>
+</body>
+</html>

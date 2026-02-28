@@ -6,6 +6,10 @@ license.workspace = true
 authors.workspace = true
 description = "ASReml-like linear mixed model library for plant breeding"
 
+[features]
+default = []
+gpu = []
+
 [dependencies]
 nalgebra = { workspace = true }
 faer = { workspace = true }
@@ -16,7 +20,7 @@ rayon = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 indexmap = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 approx = { workspace = true }
-rand = { workspace = true }

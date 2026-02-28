@@ -232,6 +232,138 @@ fn compute_xtx_scaled(x: &CsMat<f64>, scale: f64, _n: usize) -> nalgebra::DMatri
     result
 }
 
+impl MixedModelEquations {
+    /// Assemble the MME with a full (possibly non-identity) R⁻¹ matrix.
+    ///
+    /// This generalizes the scalar R⁻¹ assembly for structured residuals.
+    /// R⁻¹ is an n × n sparse matrix.
+    pub fn assemble_structured_r(
+        x: &CsMat<f64>,
+        z_blocks: &[CsMat<f64>],
+        y: &[f64],
+        r_inv: &CsMat<f64>,
+        g_inv_blocks: &[CsMat<f64>],
+    ) -> Self {
+        let n = y.len();
+        let p = x.cols();
+        let q_vec: Vec<usize> = z_blocks.iter().map(|z| z.cols()).collect();
+        let q_total: usize = q_vec.iter().sum();
+        let dim = p + q_total;
+
+        let mut c = nalgebra::DMatrix::zeros(dim, dim);
+        let mut rhs = vec![0.0; dim];
+
+        // Convert to dense for R⁻¹ products (Phase 1 approach)
+        let r_inv_dense = sparse_to_dense(r_inv, n);
+
+        // X'R⁻¹X
+        let x_dense = sparse_cols_to_dense(x, n);
+        let r_inv_x = &r_inv_dense * &x_dense;
+        let xtrinvx = x_dense.transpose() * &r_inv_x;
+        for i in 0..p {
+            for j in 0..p {
+                c[(i, j)] = xtrinvx[(i, j)];
+            }
+        }
+
+        // X'R⁻¹Z and Z'R⁻¹X blocks
+        let mut col_offset = p;
+        let mut z_denses = Vec::new();
+        for z in z_blocks {
+            let z_dense = sparse_cols_to_dense(z, n);
+            let r_inv_z = &r_inv_dense * &z_dense;
+            let xtrinvz = x_dense.transpose() * &r_inv_z;
+            for i in 0..p {
+                for j in 0..z.cols() {
+                    c[(i, col_offset + j)] = xtrinvz[(i, j)];
+                    c[(col_offset + j, i)] = xtrinvz[(i, j)];
+                }
+            }
+            z_denses.push(z_dense);
+            col_offset += z.cols();
+        }
+
+        // Z'R⁻¹Z + G⁻¹ blocks
+        let mut row_offset = p;
+        for (k, z_dense) in z_denses.iter().enumerate() {
+            let r_inv_z = &r_inv_dense * z_dense;
+            let ztrinvz = z_dense.transpose() * &r_inv_z;
+            for i in 0..z_blocks[k].cols() {
+                for j in 0..z_blocks[k].cols() {
+                    c[(row_offset + i, row_offset + j)] = ztrinvz[(i, j)];
+                }
+            }
+
+            if k < g_inv_blocks.len() {
+                let ginv = &g_inv_blocks[k];
+                for (val, (i, j)) in ginv.iter() {
+                    c[(row_offset + i, row_offset + j)] += val;
+                }
+            }
+
+            // Cross-terms
+            let mut col_off2 = p;
+            for (l, z_dense2) in z_denses.iter().enumerate() {
+                if l > k {
+                    let cross = z_dense.transpose() * &r_inv_dense * z_dense2;
+                    for i in 0..z_blocks[k].cols() {
+                        for j in 0..z_blocks[l].cols() {
+                            c[(row_offset + i, col_off2 + j)] = cross[(i, j)];
+                            c[(col_off2 + j, row_offset + i)] = cross[(i, j)];
+                        }
+                    }
+                }
+                col_off2 += z_blocks[l].cols();
+            }
+
+            row_offset += z_blocks[k].cols();
+        }
+
+        // RHS: X'R⁻¹y, Z'R⁻¹y
+        let y_vec = nalgebra::DVector::from_column_slice(y);
+        let r_inv_y = &r_inv_dense * &y_vec;
+        let xtrinvy = x_dense.transpose() * &r_inv_y;
+        for i in 0..p {
+            rhs[i] = xtrinvy[i];
+        }
+        let mut rhs_offset = p;
+        for z_dense in &z_denses {
+            let ztrinvy = z_dense.transpose() * &r_inv_y;
+            for j in 0..ztrinvy.nrows() {
+                rhs[rhs_offset + j] = ztrinvy[j];
+            }
+            rhs_offset += ztrinvy.nrows();
+        }
+
+        Self {
+            coeff_matrix: c,
+            rhs,
+            n_fixed: p,
+            n_random: q_vec,
+            dim,
+        }
+    }
+}
+
+/// Convert sparse matrix to dense nalgebra matrix.
+fn sparse_to_dense(s: &CsMat<f64>, n: usize) -> nalgebra::DMatrix<f64> {
+    let mut d = nalgebra::DMatrix::zeros(n, n);
+    for (&val, (i, j)) in s.iter() {
+        d[(i, j)] = val;
+    }
+    d
+}
+
+/// Convert sparse design matrix columns to dense.
+fn sparse_cols_to_dense(s: &CsMat<f64>, n: usize) -> nalgebra::DMatrix<f64> {
+    let p = s.cols();
+    let mut d = nalgebra::DMatrix::zeros(n, p);
+    for (&val, (i, j)) in s.iter() {
+        d[(i, j)] = val;
+    }
+    d
+}
+
 /// Compute X'Z scaled by a scalar.
 fn compute_xtz_scaled(
     x: &CsMat<f64>,

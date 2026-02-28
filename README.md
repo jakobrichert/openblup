@@ -70,22 +70,47 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 - CSV import with automatic type detection (numeric vs. categorical)
 - Flexible model specification with builder pattern API
 
-### Roadmap
+### Factor Analytic (FA) Models
+- FA1, FA2, and higher-order factor analytic covariance structures
+- Woodbury identity for efficient inverse: Σ⁻¹ = Ψ⁻¹ - Ψ⁻¹Λ(I + Λ'Ψ⁻¹Λ)⁻¹Λ'Ψ⁻¹
+- Reduced-rank modeling for multi-environment trials (Smith et al. 2001)
 
-These features are planned for future releases, roughly in priority order:
+### Residual Diagnostics
+- Conditional and marginal residuals
+- Leverage (hat values), Cook's distance
+- Standardized and studentized residuals
+- Satterthwaite denominator degrees of freedom for Wald F-tests
 
-| Feature | Description | Complexity |
-|---------|-------------|------------|
-| **Factor Analytic (FA) models** | Reduced-rank covariance for multi-environment trials (MET). FA1, FA2, etc. Dramatically reduces the number of parameters for large MET analyses (Smith et al. 2001, Thompson et al. 2003). | High |
-| **Structured R (spatial residuals)** | Extend REML to support non-identity residual structures (e.g., AR1xAR1 residual in field trials). Currently R = σ²I; this would allow R = σ² (Σ_row ⊗ Σ_col). | Medium |
-| **Satterthwaite / Kenward-Roger df** | Improved denominator degrees of freedom for Wald F-tests. Currently uses the containment method; Kenward-Roger is more accurate for unbalanced designs. | Medium |
-| **Residual diagnostics** | Conditional and marginal residuals, leverage, Cook's distance, QQ plots. Essential for model checking in practice. | Medium |
-| **Selection indices** | Smith-Hazel index, economic weights, index coefficients. Used in multi-trait selection to combine breeding values into a single selection criterion. | Low |
-| **Marker effect models (RR-BLUP)** | Ridge regression BLUP for estimating individual SNP marker effects rather than genomic breeding values. Useful for genomic prediction and QTL mapping. | Medium |
-| **Cross-validation** | k-fold CV for assessing genomic prediction accuracy. Widely used to compare models and training population designs. | Low |
-| **Sparse inverse subset** | Compute only the diagonal (or selected elements) of C⁻¹ using Takahashi equations, avoiding full dense inversion. Critical for scaling to >10,000 animals. | High |
-| **GPU acceleration** | CUDA/ROCm support for G-matrix computation and dense linear algebra on large genomic datasets. | High |
-| **WASM target** | Compile to WebAssembly for browser-based breeding value estimation. Useful for education and lightweight field tools. | Low |
+### Selection Indices
+- Smith-Hazel index: b = P⁻¹Ga (Smith 1936, Hazel 1943)
+- Restricted index (Kempthorne & Nordskog 1959) — zero gain on restricted traits
+- Desired gains index (Pesek & Baker 1969)
+- Accuracy, expected genetic gain, index variance
+
+### Marker Effect Models (RR-BLUP)
+- Ridge regression BLUP for individual SNP marker effects
+- EM-REML for variance component estimation
+- Genomic prediction from marker effects
+
+### Cross-Validation
+- k-fold and leave-one-out cross-validation
+- Stratified fold creation
+- Prediction accuracy (Pearson correlation, regression slope)
+
+### Sparse Inverse Subset
+- Sparse Cholesky factorization (left-looking algorithm)
+- Selected elements of C⁻¹ via Takahashi equations
+- Efficient tr(A⁻¹B) computation
+
+### GPU Acceleration (feature-gated)
+- `gpu` feature flag for optional GPU support
+- CPU fallback for G-matrix computation
+- Architecture ready for wgpu compute shaders
+
+### WebAssembly Target
+- Self-contained WASM crate (no rayon, no faer, no file I/O)
+- JSON API for A-inverse, mixed model fitting, G-matrix
+- Browser demo page included
 
 ## Quick Start (Rust)
 
@@ -177,7 +202,7 @@ openblup ainverse --pedigree pedigree.csv
 # Requires Rust 1.70+ (tested with 1.93)
 cargo build --release
 
-# Run tests (214 tests)
+# Run tests (295 tests)
 cargo test --workspace
 
 # Build Python bindings
@@ -193,16 +218,18 @@ cargo build --release -p openblup-cli
 ```
 openblup/
 ├── crates/
-│   ├── core/                 # Pure Rust library (13,000+ lines)
+│   ├── core/                 # Pure Rust library (17,000+ lines)
 │   │   ├── data/             # DataFrame, Factor columns, CSV I/O
-│   │   ├── matrix/           # Sparse ops, dense helpers, faer Cholesky
+│   │   ├── matrix/           # Sparse ops, dense helpers, faer Cholesky, sparse inverse
 │   │   ├── model/            # Builder API, design matrices, multi-trait
-│   │   ├── lmm/              # MME, AI-REML, EM-REML, BLUP/BLUE
-│   │   ├── variance/         # AR1, Diagonal, Unstructured, Kronecker
-│   │   ├── genetics/         # Pedigree, A/G/H matrices, breeding values
-│   │   └── diagnostics/      # LogL, AIC/BIC, Wald tests, convergence
+│   │   ├── lmm/              # MME, AI-REML, EM-REML, BLUP/BLUE, structured R
+│   │   ├── variance/         # AR1, Diagonal, Unstructured, Kronecker, Factor Analytic
+│   │   ├── genetics/         # Pedigree, A/G/H matrices, RR-BLUP, selection indices
+│   │   ├── diagnostics/      # Wald tests, residuals, cross-validation, Satterthwaite df
+│   │   └── gpu/              # Feature-gated GPU acceleration
 │   ├── python-bindings/      # PyO3 bridge with numpy/scipy interop
-│   └── cli/                  # Command-line tool (clap)
+│   ├── cli/                  # Command-line tool (clap)
+│   └── wasm/                 # WebAssembly target with browser demo
 └── python/                   # Python package + type stubs
 ```
 
@@ -251,12 +278,12 @@ The algorithms implemented here are based on well-established quantitative genet
 | Single-step (H) | Yes | Yes | No | **Yes** |
 | Spatial (AR1xAR1) | Yes | Yes | No | **Yes** |
 | Multi-trait | Yes | Yes | Yes | **Yes** |
-| Factor analytic | Yes | Limited | No | Planned |
+| Factor analytic | Yes | Limited | No | **Yes** |
 | Sparse solver | Yes | No | Yes | **Yes (faer)** |
 | Python API | No | No | No | **Yes (PyO3)** |
 | CLI tool | Yes | No | No | **Yes** |
 | Wald tests | Yes | Yes | Yes | **Yes** |
-| WebAssembly target | No | No | No | Possible |
+| WebAssembly target | No | No | No | **Yes** |
 | Memory safe | No | N/A | Yes (GC) | **Yes (ownership)** |
 | Performance | Excellent | Slow | Good | **Excellent** |
 
@@ -274,9 +301,9 @@ Contributions are welcome! See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the fu
 | Area | What's Needed |
 |------|---------------|
 | **Validation** | Run the same model in OpenBLUP + ASReml/sommer, compare variance components and BLUPs |
-| **Factor Analytic** | FA1/FA2 variance structures for multi-environment trial analysis |
 | **Tutorials** | Worked examples from real breeding programs (dairy, wheat, maize, forestry) |
 | **Python polish** | pandas DataFrame input, better error messages, documentation |
+| **GPU backends** | wgpu compute shader implementations for G-matrix and dense solvers |
 
 Even if you don't write code — validation reports, bug reports, and feature requests are extremely valuable. See our [issue templates](.github/ISSUE_TEMPLATE/).
 
