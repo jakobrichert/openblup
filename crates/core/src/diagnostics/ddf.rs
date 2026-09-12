@@ -728,11 +728,15 @@ mod tests {
                     name: "group".to_string(),
                     structure: "Identity".to_string(),
                     parameters: vec![("sigma2".to_string(), sigma2_u)],
+                    se: vec![],
+                    at_boundary: vec![],
                 },
                 VarianceEstimate {
                     name: "residual".to_string(),
                     structure: "Identity".to_string(),
                     parameters: vec![("sigma2".to_string(), sigma2_e)],
+                    se: vec![],
+                    at_boundary: vec![],
                 },
             ],
             fixed_effects: vec![NamedEffect {
@@ -936,11 +940,15 @@ mod tests {
                     name: "block".to_string(),
                     structure: "Identity".to_string(),
                     parameters: vec![("sigma2".to_string(), sigma2_u)],
+                    se: vec![],
+                    at_boundary: vec![],
                 },
                 VarianceEstimate {
                     name: "residual".to_string(),
                     structure: "Identity".to_string(),
                     parameters: vec![("sigma2".to_string(), sigma2_e)],
+                    se: vec![],
+                    at_boundary: vec![],
                 },
             ],
             fixed_effects: vec![

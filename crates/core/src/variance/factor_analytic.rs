@@ -277,45 +277,93 @@ impl VarStruct for FactorAnalytic {
 
     fn derivatives_of_inverse(&self, dim: usize) -> Vec<SparseMat> {
         assert_eq!(dim, self.n_env);
-        let n_params = self.n_params();
-        let eps = 1e-7;
-        let mut derivs = Vec::with_capacity(n_params);
-
-        for p_idx in 0..n_params {
-            let mut params_plus = self.params();
-            let mut params_minus = self.params();
-            params_plus[p_idx] += eps;
-            params_minus[p_idx] -= eps;
-
-            let fa_plus = FactorAnalytic::from_params(
-                self.n_env,
-                self.n_factors,
-                params_plus[..self.n_env * self.n_factors].to_vec(),
-                params_plus[self.n_env * self.n_factors..].to_vec(),
-            );
-            let fa_minus = FactorAnalytic::from_params(
-                self.n_env,
-                self.n_factors,
-                params_minus[..self.n_env * self.n_factors].to_vec(),
-                params_minus[self.n_env * self.n_factors..].to_vec(),
-            );
-
-            // Ensure positive specific variances for perturbed params
-            let inv_plus = fa_plus.sigma_inv_dense();
-            let inv_minus = fa_minus.sigma_inv_dense();
-
-            let mut tri = TriMat::new((dim, dim));
-            for i in 0..dim {
-                for j in 0..dim {
-                    let d = (inv_plus[i][j] - inv_minus[i][j]) / (2.0 * eps);
-                    if d.abs() > 1e-15 {
-                        tri.add_triplet(i, j, d);
+        // dSigma^-1/dtheta = -Sigma^-1 (dSigma/dtheta) Sigma^-1, with the exact
+        // dSigma/dtheta from `derivatives_of_covariance`.
+        let inv = self.sigma_inv_dense();
+        let p = self.n_env;
+        self.derivatives_of_covariance(dim)
+            .iter()
+            .map(|d| {
+                let mut dd = vec![vec![0.0; p]; p];
+                for (v, (a, b)) in d.iter() {
+                    dd[a][b] = *v;
+                }
+                // -inv * dd * inv
+                let mut tmp = vec![vec![0.0; p]; p];
+                for a in 0..p {
+                    for b in 0..p {
+                        let mut acc = 0.0;
+                        for c in 0..p {
+                            acc += inv[a][c] * dd[c][b];
+                        }
+                        tmp[a][b] = acc;
                     }
                 }
+                let mut tri = TriMat::new((p, p));
+                for a in 0..p {
+                    for b in 0..p {
+                        let mut acc = 0.0;
+                        for c in 0..p {
+                            acc += tmp[a][c] * inv[c][b];
+                        }
+                        if acc.abs() > 1e-300 {
+                            tri.add_triplet(a, b, -acc);
+                        }
+                    }
+                }
+                tri.to_csc()
+            })
+            .collect()
+    }
+
+    fn derivatives_of_covariance(&self, dim: usize) -> Vec<SparseMat> {
+        assert_eq!(dim, self.n_env);
+        let p = self.n_env;
+        let k = self.n_factors;
+        let mut out = Vec::with_capacity(self.n_params());
+        // dSigma/dlambda_{i,f} = e_i lambda_f' + lambda_f e_i'
+        for f in 0..k {
+            for i in 0..p {
+                let mut tri = TriMat::new((p, p));
+                for j in 0..p {
+                    let v = self.loading(j, f);
+                    if v != 0.0 || i == j {
+                        // entry (i, j) gets lambda_{j,f}; entry (j, i) gets lambda_{j,f}
+                        if i == j {
+                            tri.add_triplet(i, i, 2.0 * v);
+                        } else {
+                            tri.add_triplet(i, j, v);
+                            tri.add_triplet(j, i, v);
+                        }
+                    }
+                }
+                out.push(tri.to_csc());
             }
-            derivs.push(tri.to_csc());
         }
-        derivs
+        // dSigma/dpsi_i = e_i e_i'
+        for i in 0..p {
+            let mut tri = TriMat::new((p, p));
+            tri.add_triplet(i, i, 1.0);
+            out.push(tri.to_csc());
+        }
+        out
+    }
+
+    fn fixed_dim(&self) -> Option<usize> {
+        Some(self.n_env)
+    }
+
+    fn param_names(&self) -> Vec<String> {
+        let mut names = Vec::with_capacity(self.n_params());
+        for f in 0..self.n_factors {
+            for i in 0..self.n_env {
+                names.push(format!("lambda_{}_{}", i + 1, f + 1));
+            }
+        }
+        for i in 0..self.n_env {
+            names.push(format!("psi_{}", i + 1));
+        }
+        names
     }
 
     fn bounds(&self) -> Vec<(f64, f64)> {

@@ -43,7 +43,14 @@ impl AiReml {
     }
 
     /// Fit the model using AI-REML with EM burn-in.
+    ///
+    /// Models with multi-parameter variance structures (AR1, Diagonal,
+    /// Unstructured, FactorAnalytic, Kronecker interactions) or a structured
+    /// residual are handled by the [`GeneralReml`](super::GeneralReml) engine.
     pub fn fit(&self, model: &mut MixedModel) -> Result<FitResult> {
+        if model.needs_general_engine() {
+            return super::GeneralReml::new(self.max_iter, self.tol).fit(model);
+        }
         let n = model.n_obs;
         let n_random_terms = model.random_var_structs.len();
         let n_params = n_random_terms + 1; // random variances + residual
@@ -709,17 +716,22 @@ impl AiReml {
 
         // Variance component estimates
         let mut variance_components = Vec::new();
+        let n_terms = model.random_var_structs.len();
         for (k, vs) in model.random_var_structs.iter().enumerate() {
             variance_components.push(VarianceEstimate {
                 name: model.random_term_names[k].clone(),
                 structure: vs.name().to_string(),
                 parameters: vec![("sigma2".to_string(), vs.params()[0])],
+                se: vec![variance_se.get(k).copied().unwrap_or(0.0)],
+                at_boundary: vec![at_boundary.get(k).copied().unwrap_or(false)],
             });
         }
         variance_components.push(VarianceEstimate {
             name: "residual".to_string(),
             structure: model.residual_var_struct.name().to_string(),
             parameters: vec![("sigma2".to_string(), sigma_e2)],
+            se: vec![variance_se.get(n_terms).copied().unwrap_or(0.0)],
+            at_boundary: vec![at_boundary.get(n_terms).copied().unwrap_or(false)],
         });
 
         // Fixed effects with SEs from C^{-1}

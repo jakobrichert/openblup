@@ -74,6 +74,10 @@ impl VarStruct for Identity {
         vec![(1e-10, f64::INFINITY)]
     }
 
+    fn param_names(&self) -> Vec<String> {
+        vec!["sigma2".to_string()]
+    }
+
     fn clone_boxed(&self) -> Box<dyn VarStruct> {
         Box::new(self.clone())
     }

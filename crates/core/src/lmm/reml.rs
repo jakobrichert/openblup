@@ -25,7 +25,18 @@ impl EmReml {
     }
 
     /// Fit the model using EM-REML.
+    ///
+    /// EM updates exist only for scaled identity / relationship-matrix terms
+    /// with an IID residual; other structures need AI-REML.
     pub fn fit(&self, model: &mut MixedModel) -> Result<FitResult> {
+        if model.needs_general_engine() {
+            return Err(LmmError::ModelSpec(
+                "EM-REML only supports scaled identity/relationship-matrix random terms with an \
+                 IID residual; use AI-REML (fit_reml) for AR1, FA, Diagonal, Unstructured, \
+                 interaction or structured-residual models"
+                    .into(),
+            ));
+        }
         let n = model.n_obs;
         let n_random_terms = model.random_var_structs.len();
 
@@ -299,12 +310,16 @@ impl EmReml {
                 name: model.random_term_names[k].clone(),
                 structure: vs.name().to_string(),
                 parameters: vec![("sigma2".to_string(), vs.params()[0])],
+                se: vec![0.0],
+                at_boundary: vec![false],
             });
         }
         variance_components.push(VarianceEstimate {
             name: "residual".to_string(),
             structure: model.residual_var_struct.name().to_string(),
             parameters: vec![("sigma2".to_string(), sigma_e2)],
+            se: vec![0.0],
+            at_boundary: vec![false],
         });
 
         // Fixed effects with SEs from C^{-1}

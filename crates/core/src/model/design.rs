@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use sprs::TriMat;
 
-use crate::data::DataFrame;
+use crate::data::{DataFrame, FactorColumn};
 use crate::error::{LmmError, Result};
 use crate::types::SparseMat;
 
@@ -208,6 +208,74 @@ pub fn build_random_design_with_levels(
     }
 
     Ok((tri.to_csc(), levels.to_vec()))
+}
+
+/// Build the design matrix of an interaction random term `a:b` whose levels
+/// are all combinations of `levels_a` and `levels_b`, ordered `a`-major
+/// (column index `ia * levels_b.len() + ib`). This is the ordering of a
+/// Kronecker covariance `Sigma_a ⊗ Sigma_b`.
+///
+/// Returns the sparse incidence matrix and the combined level labels
+/// `"a_level:b_level"`. Every observed combination must be covered by the
+/// supplied levels; combinations without observations get empty columns.
+pub fn build_random_design_interaction(
+    df: &DataFrame,
+    col_a: &str,
+    levels_a: &[String],
+    col_b: &str,
+    levels_b: &[String],
+) -> Result<(SparseMat, Vec<String>)> {
+    let n = df.nrows();
+    let fa = df.factor_view(col_a)?;
+    let fb = df.factor_view(col_b)?;
+
+    let index_of = |levels: &[String], col: &str| -> Result<HashMap<String, usize>> {
+        let mut index = HashMap::with_capacity(levels.len());
+        for (j, level) in levels.iter().enumerate() {
+            if index.insert(level.clone(), j).is_some() {
+                return Err(LmmError::ModelSpec(format!(
+                    "Duplicate level '{}' in the level list for '{}'",
+                    level, col
+                )));
+            }
+        }
+        Ok(index)
+    };
+    let index_a = index_of(levels_a, col_a)?;
+    let index_b = index_of(levels_b, col_b)?;
+
+    let map_codes =
+        |f: &FactorColumn, index: &HashMap<String, usize>, col: &str| -> Result<Vec<usize>> {
+            f.level_names()
+                .iter()
+                .map(|name| {
+                    index.get(*name).copied().ok_or_else(|| {
+                        LmmError::ModelSpec(format!(
+                            "Level '{}' of '{}' is not among the supplied levels",
+                            name, col
+                        ))
+                    })
+                })
+                .collect()
+        };
+    let code_a = map_codes(&fa, &index_a, col_a)?;
+    let code_b = map_codes(&fb, &index_b, col_b)?;
+
+    let qb = levels_b.len();
+    let mut tri = TriMat::new((n, levels_a.len() * qb));
+    for i in 0..n {
+        let ia = code_a[fa.codes()[i]];
+        let ib = code_b[fb.codes()[i]];
+        tri.add_triplet(i, ia * qb + ib, 1.0);
+    }
+
+    let mut labels = Vec::with_capacity(levels_a.len() * qb);
+    for la in levels_a {
+        for lb in levels_b {
+            labels.push(format!("{}:{}", la, lb));
+        }
+    }
+    Ok((tri.to_csc(), labels))
 }
 
 /// Build the block-diagonal Z matrix from multiple random terms.
@@ -441,6 +509,29 @@ mod tests {
             .collect();
         let err = build_random_design_with_levels(&df, "genotype", &levels).unwrap_err();
         assert!(matches!(err, LmmError::ModelSpec(_)));
+    }
+
+    #[test]
+    fn test_build_random_design_interaction() {
+        let mut df = DataFrame::new();
+        df.add_float_column("y", vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        df.add_factor_column("env", &["E1", "E1", "E2", "E2"])
+            .unwrap();
+        df.add_factor_column("geno", &["G2", "G1", "G2", "G1"])
+            .unwrap();
+        let envs: Vec<String> = vec!["E1".into(), "E2".into()];
+        let genos: Vec<String> = vec!["G1".into(), "G2".into(), "G3".into()];
+        let (z, labels) =
+            build_random_design_interaction(&df, "env", &envs, "geno", &genos).unwrap();
+        assert_eq!(z.cols(), 6);
+        assert_eq!(labels[0], "E1:G1");
+        assert_eq!(labels[5], "E2:G3");
+        // obs 0: E1:G2 -> column 0*3+1 = 1; obs 3: E2:G1 -> column 1*3+0 = 3
+        let result = spmv(&z, &[0.0, 10.0, 0.0, 20.0, 0.0, 0.0]);
+        assert_eq!(result, vec![10.0, 0.0, 0.0, 20.0]);
+        // missing level errors
+        let bad: Vec<String> = vec!["G1".into()];
+        assert!(build_random_design_interaction(&df, "env", &envs, "geno", &bad).is_err());
     }
 
     #[test]

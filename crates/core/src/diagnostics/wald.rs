@@ -471,6 +471,8 @@ mod tests {
                 name: "residual".to_string(),
                 structure: "Identity".to_string(),
                 parameters: vec![("sigma2".to_string(), 1.0)],
+                se: vec![],
+                at_boundary: vec![],
             }],
             fixed_effects: vec![NamedEffect {
                 term: "mu".to_string(),
@@ -513,6 +515,8 @@ mod tests {
                 name: "residual".to_string(),
                 structure: "Identity".to_string(),
                 parameters: vec![("sigma2".to_string(), 1.0)],
+                se: vec![],
+                at_boundary: vec![],
             }],
             fixed_effects: vec![
                 NamedEffect {

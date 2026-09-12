@@ -1,13 +1,31 @@
+use std::collections::HashSet;
+
 use crate::data::DataFrame;
 use crate::error::{LmmError, Result};
 use crate::genetics::{compute_a_inverse_with_inbreeding, Pedigree};
 use crate::types::SparseMat;
-use crate::variance::VarStruct;
+use crate::variance::{Known, KroneckerStruct, VarStruct};
 
 use super::design::{
     build_combined_random_design, build_fixed_design, build_random_design,
-    build_random_design_with_levels, parse_fixed_formula, FixedEffectLabel, FixedTerm,
+    build_random_design_interaction, build_random_design_with_levels, parse_fixed_formula,
+    FixedEffectLabel, FixedTerm,
 };
+
+/// Mapping of observations onto the cells of a `rows x cols` grid for a
+/// separable (Kronecker) residual structure.
+#[derive(Debug, Clone)]
+pub struct ResidualGrid {
+    /// Number of grid cells (`n_rows * n_cols`), the dimension of the
+    /// residual variance structure.
+    pub n_cells: usize,
+    /// Cell index (`row * n_cols + col`) of each observation.
+    pub cell_index: Vec<usize>,
+    /// Row factor levels (grid order).
+    pub row_levels: Vec<String>,
+    /// Column factor levels (grid order).
+    pub col_levels: Vec<String>,
+}
 
 /// A fully specified mixed model, ready for fitting.
 pub struct MixedModel {
@@ -33,9 +51,25 @@ pub struct MixedModel {
     pub random_term_names: Vec<String>,
     /// Residual variance structure.
     pub residual_var_struct: Box<dyn VarStruct>,
+    /// Grid layout of a separable residual structure, if any. When set, the
+    /// residual structure is defined on `n_cells` cells and the observations
+    /// use the cells listed in `cell_index` (missing plots are allowed).
+    pub residual_grid: Option<ResidualGrid>,
     /// REML configuration.
     pub max_iter: usize,
     pub convergence_tol: f64,
+}
+
+impl MixedModel {
+    /// Whether the model needs the general REML engine: any random term
+    /// with a structure other than a single scaled identity/relationship
+    /// matrix, or a non-IID residual.
+    pub fn needs_general_engine(&self) -> bool {
+        let simple = |vs: &dyn VarStruct| vs.name() == "Identity" && vs.n_params() == 1;
+        !self.random_var_structs.iter().all(|vs| simple(vs.as_ref()))
+            || !simple(self.residual_var_struct.as_ref())
+            || self.residual_grid.is_some()
+    }
 }
 
 /// Builder for constructing a [`MixedModel`].
@@ -68,8 +102,17 @@ pub struct MixedModelBuilder<'a> {
     fixed_terms: Vec<FixedTerm>,
     random_terms: Vec<RandomTermSpec<'a>>,
     residual_structure: Option<Box<dyn VarStruct>>,
+    residual_grid: Option<ResidualGridSpec>,
     max_iter: usize,
     convergence_tol: f64,
+}
+
+/// A separable residual `Sigma_row(theta) ⊗ Sigma_col(phi)` over a grid.
+struct ResidualGridSpec {
+    row_col: String,
+    row_vs: Box<dyn VarStruct>,
+    col_col: String,
+    col_vs: Box<dyn VarStruct>,
 }
 
 /// Where the levels (columns of Z) of a random term come from.
@@ -83,11 +126,23 @@ enum RandomLevels<'a> {
     Pedigree(&'a Pedigree),
 }
 
+/// The second factor of an interaction term.
+enum InnerFactor<'a> {
+    /// Independent levels (`Known::identity`).
+    Independent,
+    /// A parameterised structure (e.g. `AR1::correlation` for columns).
+    Structured(Box<dyn VarStruct>),
+    /// Pedigree relationship matrix (`Known(A⁻¹)`), levels in pedigree order.
+    Pedigree(&'a Pedigree),
+}
+
 struct RandomTermSpec<'a> {
     column: String,
     variance_structure: Box<dyn VarStruct>,
     ginv: Option<SparseMat>,
     levels: RandomLevels<'a>,
+    /// For interaction terms `column:inner`: the inner factor.
+    interaction: Option<(String, InnerFactor<'a>)>,
 }
 
 impl<'a> MixedModelBuilder<'a> {
@@ -100,6 +155,7 @@ impl<'a> MixedModelBuilder<'a> {
             fixed_terms: Vec::new(),
             random_terms: Vec::new(),
             residual_structure: None,
+            residual_grid: None,
             max_iter: 50,
             convergence_tol: 1e-6,
         }
@@ -154,6 +210,7 @@ impl<'a> MixedModelBuilder<'a> {
             variance_structure: Box::new(vs),
             ginv,
             levels: RandomLevels::FromData,
+            interaction: None,
         });
         self
     }
@@ -177,6 +234,7 @@ impl<'a> MixedModelBuilder<'a> {
             variance_structure: Box::new(vs),
             ginv,
             levels: RandomLevels::Explicit(levels),
+            interaction: None,
         });
         self
     }
@@ -199,14 +257,114 @@ impl<'a> MixedModelBuilder<'a> {
             variance_structure: Box::new(vs),
             ginv: None,
             levels: RandomLevels::Pedigree(pedigree),
+            interaction: None,
+        });
+        self
+    }
+
+    /// Add an interaction random term `outer:inner` with a separable
+    /// covariance `Sigma_outer(theta) ⊗ I`, e.g. genotype-by-environment
+    /// effects with a factor analytic or diagonal structure across
+    /// environments: `.random_interaction("env", fa1(n_env), "genotype")`.
+    ///
+    /// The levels of both factors are taken from the data; `outer_vs` must be
+    /// defined for the number of outer levels.
+    pub fn random_interaction(
+        mut self,
+        outer: &str,
+        outer_vs: impl VarStruct + 'static,
+        inner: &str,
+    ) -> Self {
+        self.random_terms.push(RandomTermSpec {
+            column: outer.to_string(),
+            variance_structure: Box::new(outer_vs),
+            ginv: None,
+            levels: RandomLevels::FromData,
+            interaction: Some((inner.to_string(), InnerFactor::Independent)),
+        });
+        self
+    }
+
+    /// Add an interaction random term with structures on both factors,
+    /// `Sigma_outer(theta) ⊗ Sigma_inner(phi)`, e.g. a separable spatial
+    /// random effect `.random_interaction_with("row", AR1::new(1.0, 0.5), "col", AR1::correlation(0.5))`.
+    /// Use a correlation-only structure on one side so that the scale is
+    /// identifiable.
+    pub fn random_interaction_with(
+        mut self,
+        outer: &str,
+        outer_vs: impl VarStruct + 'static,
+        inner: &str,
+        inner_vs: impl VarStruct + 'static,
+    ) -> Self {
+        self.random_terms.push(RandomTermSpec {
+            column: outer.to_string(),
+            variance_structure: Box::new(outer_vs),
+            ginv: None,
+            levels: RandomLevels::FromData,
+            interaction: Some((
+                inner.to_string(),
+                InnerFactor::Structured(Box::new(inner_vs)),
+            )),
+        });
+        self
+    }
+
+    /// Add an interaction random term `outer:animal` with covariance
+    /// `Sigma_outer(theta) ⊗ A`, where `A` is the pedigree relationship
+    /// matrix (multi-environment or multi-trait-like animal models). The
+    /// inner levels are all animals of the pedigree in sorted order.
+    pub fn random_interaction_pedigree(
+        mut self,
+        outer: &str,
+        outer_vs: impl VarStruct + 'static,
+        inner: &str,
+        pedigree: &'a Pedigree,
+    ) -> Self {
+        self.random_terms.push(RandomTermSpec {
+            column: outer.to_string(),
+            variance_structure: Box::new(outer_vs),
+            ginv: None,
+            levels: RandomLevels::FromData,
+            interaction: Some((inner.to_string(), InnerFactor::Pedigree(pedigree))),
         });
         self
     }
 
     /// Set the residual variance structure.
     /// If not called, defaults to Identity (homogeneous residual variance).
+    ///
+    /// A structure with an intrinsic dimension (Diagonal, Unstructured,
+    /// FactorAnalytic) must match the number of observations; AR1 applies
+    /// to the observations in data order.
     pub fn residual(mut self, vs: impl VarStruct + 'static) -> Self {
         self.residual_structure = Some(Box::new(vs));
+        self.residual_grid = None;
+        self
+    }
+
+    /// Set a separable residual structure `Sigma_row(theta) ⊗ Sigma_col(phi)`
+    /// over the grid defined by two factor columns (typically field rows and
+    /// columns): `.residual_interaction("row", AR1::new(1.0, 0.5), "col", AR1::correlation(0.5))`.
+    ///
+    /// Every observation must occupy a distinct `(row, col)` cell; cells
+    /// without an observation (missing plots) are allowed. Use a
+    /// correlation-only structure on one side so that the residual variance
+    /// is identifiable.
+    pub fn residual_interaction(
+        mut self,
+        row: &str,
+        row_vs: impl VarStruct + 'static,
+        col: &str,
+        col_vs: impl VarStruct + 'static,
+    ) -> Self {
+        self.residual_structure = None;
+        self.residual_grid = Some(ResidualGridSpec {
+            row_col: row.to_string(),
+            row_vs: Box::new(row_vs),
+            col_col: col.to_string(),
+            col_vs: Box::new(col_vs),
+        });
         self
     }
 
@@ -268,6 +426,103 @@ impl<'a> MixedModelBuilder<'a> {
         let mut random_term_names = Vec::new();
 
         for rt in self.random_terms {
+            if let Some((inner_col, inner)) = rt.interaction {
+                let outer_levels: Vec<String> = df
+                    .factor_view(&rt.column)?
+                    .level_names()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                let (inner_levels, inner_vs): (Vec<String>, Box<dyn VarStruct>) = match inner {
+                    InnerFactor::Independent => {
+                        let levels: Vec<String> = df
+                            .factor_view(&inner_col)?
+                            .level_names()
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect();
+                        let q = levels.len();
+                        (levels, Box::new(Known::identity(q)))
+                    }
+                    InnerFactor::Structured(vs) => {
+                        let levels: Vec<String> = df
+                            .factor_view(&inner_col)?
+                            .level_names()
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect();
+                        (levels, vs)
+                    }
+                    InnerFactor::Pedigree(ped) => {
+                        let sorted;
+                        let ped_ref: &Pedigree = if ped.is_sorted() {
+                            ped
+                        } else {
+                            let mut p = ped.clone();
+                            p.sort_pedigree()?;
+                            sorted = p;
+                            &sorted
+                        };
+                        let ids: Vec<String> = (0..ped_ref.n_animals())
+                            .map(|i| ped_ref.animal_id(i).to_string())
+                            .collect();
+                        let a_inv = compute_a_inverse_with_inbreeding(ped_ref)?;
+                        (ids, Box::new(Known::from_inverse(a_inv)?))
+                    }
+                };
+                let (z, labels) = build_random_design_interaction(
+                    df,
+                    &rt.column,
+                    &outer_levels,
+                    &inner_col,
+                    &inner_levels,
+                )?;
+                let vs = KroneckerStruct::new(
+                    rt.variance_structure,
+                    outer_levels.len(),
+                    inner_vs,
+                    inner_levels.len(),
+                    &rt.column,
+                    &inner_col,
+                )?;
+                z_blocks.push(z);
+                random_level_names.push(labels);
+                random_var_structs.push(Box::new(vs) as Box<dyn VarStruct>);
+                ginv_matrices.push(None);
+                random_term_names.push(format!("{}:{}", rt.column, inner_col));
+                continue;
+            }
+
+            if let Some(d) = rt.variance_structure.fixed_dim() {
+                let q = match &rt.levels {
+                    RandomLevels::FromData => df.factor_view(&rt.column)?.n_levels(),
+                    RandomLevels::Explicit(levels) => levels.len(),
+                    RandomLevels::Pedigree(ped) => ped.n_animals(),
+                };
+                if d != q {
+                    return Err(LmmError::DimensionMismatch {
+                        expected: q,
+                        got: d,
+                        context: format!(
+                            "{} structure for '{}' is defined for {} levels but the term has {}",
+                            rt.variance_structure.name(),
+                            rt.column,
+                            d,
+                            q
+                        ),
+                    });
+                }
+            }
+            if rt.variance_structure.name() != "Identity"
+                && (rt.ginv.is_some() || matches!(rt.levels, RandomLevels::Pedigree(_)))
+            {
+                return Err(LmmError::ModelSpec(format!(
+                    "Random term '{}': a relationship matrix can only be combined with an \
+                     Identity structure; use random_interaction_pedigree for structured terms",
+                    rt.column
+                )));
+            }
+
             let (z, levels, ginv) = match rt.levels {
                 RandomLevels::FromData => {
                     let (z, levels) = build_random_design(df, &rt.column)?;
@@ -325,9 +580,66 @@ impl<'a> MixedModelBuilder<'a> {
         let z_combined = build_combined_random_design(&z_blocks, n);
 
         // Residual structure defaults to Identity
-        let residual_var_struct = self
-            .residual_structure
-            .unwrap_or_else(|| Box::new(crate::variance::Identity::default()));
+        let (residual_var_struct, residual_grid): (Box<dyn VarStruct>, Option<ResidualGrid>) =
+            match (self.residual_structure, self.residual_grid) {
+                (_, Some(spec)) => {
+                    let rows = df.factor_view(&spec.row_col)?;
+                    let cols = df.factor_view(&spec.col_col)?;
+                    let row_levels: Vec<String> =
+                        rows.level_names().iter().map(|s| s.to_string()).collect();
+                    let col_levels: Vec<String> =
+                        cols.level_names().iter().map(|s| s.to_string()).collect();
+                    let n_cols = col_levels.len();
+                    let mut seen = HashSet::with_capacity(n);
+                    let mut cell_index = Vec::with_capacity(n);
+                    for i in 0..n {
+                        let cell = rows.codes()[i] * n_cols + cols.codes()[i];
+                        if !seen.insert(cell) {
+                            return Err(LmmError::ModelSpec(format!(
+                                "Residual grid: observation {} shares cell ({}, {}) with another \
+                                 observation; each (row, col) may occur only once",
+                                i + 1,
+                                row_levels[rows.codes()[i]],
+                                col_levels[cols.codes()[i]]
+                            )));
+                        }
+                        cell_index.push(cell);
+                    }
+                    let vs = KroneckerStruct::new(
+                        spec.row_vs,
+                        row_levels.len(),
+                        spec.col_vs,
+                        n_cols,
+                        &spec.row_col,
+                        &spec.col_col,
+                    )?;
+                    let grid = ResidualGrid {
+                        n_cells: row_levels.len() * n_cols,
+                        cell_index,
+                        row_levels,
+                        col_levels,
+                    };
+                    (Box::new(vs), Some(grid))
+                }
+                (Some(vs), None) => {
+                    if let Some(d) = vs.fixed_dim() {
+                        if d != n {
+                            return Err(LmmError::DimensionMismatch {
+                                expected: n,
+                                got: d,
+                                context: format!(
+                                    "residual {} structure is defined for {} observations but there are {}",
+                                    vs.name(),
+                                    d,
+                                    n
+                                ),
+                            });
+                        }
+                    }
+                    (vs, None)
+                }
+                (None, None) => (Box::new(crate::variance::Identity::default()), None),
+            };
 
         Ok(MixedModel {
             n_obs: n,
@@ -341,6 +653,7 @@ impl<'a> MixedModelBuilder<'a> {
             ginv_matrices,
             random_term_names,
             residual_var_struct,
+            residual_grid,
             max_iter: self.max_iter,
             convergence_tol: self.convergence_tol,
         })

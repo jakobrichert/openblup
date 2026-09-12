@@ -27,55 +27,99 @@ use super::traits::VarStruct;
 pub struct AR1 {
     sigma2: f64,
     rho: f64,
+    /// When true the variance is fixed at 1 and `rho` is the only parameter
+    /// (a pure correlation structure, e.g. the second factor of AR1 x AR1).
+    correlation_only: bool,
 }
 
 impl AR1 {
     /// Create a new AR1 structure with the given variance and autocorrelation.
     pub fn new(sigma2: f64, rho: f64) -> Self {
-        Self { sigma2, rho }
+        Self {
+            sigma2,
+            rho,
+            correlation_only: false,
+        }
+    }
+
+    /// A pure AR1 *correlation* structure (unit variance, `rho` the only
+    /// parameter). Use it for one factor of a separable `AR1 x AR1` model so
+    /// that the overall scale is identifiable.
+    pub fn correlation(rho: f64) -> Self {
+        Self {
+            sigma2: 1.0,
+            rho,
+            correlation_only: true,
+        }
     }
 
     /// Create with default starting values (sigma^2 = 1.0, rho = 0.5).
     pub fn default_start() -> Self {
-        Self {
-            sigma2: 1.0,
-            rho: 0.5,
-        }
+        Self::new(1.0, 0.5)
+    }
+
+    /// Whether this is a correlation-only structure.
+    pub fn is_correlation_only(&self) -> bool {
+        self.correlation_only
+    }
+
+    /// The autocorrelation parameter.
+    pub fn rho(&self) -> f64 {
+        self.rho
     }
 }
 
 impl VarStruct for AR1 {
     fn name(&self) -> &str {
-        "AR1"
+        if self.correlation_only {
+            "AR1corr"
+        } else {
+            "AR1"
+        }
     }
 
     fn n_params(&self) -> usize {
-        2
+        if self.correlation_only {
+            1
+        } else {
+            2
+        }
     }
 
     fn params(&self) -> Vec<f64> {
-        vec![self.sigma2, self.rho]
+        if self.correlation_only {
+            vec![self.rho]
+        } else {
+            vec![self.sigma2, self.rho]
+        }
     }
 
     fn set_params(&mut self, params: &[f64]) -> Result<()> {
-        if params.len() != 2 {
+        if params.len() != self.n_params() {
             return Err(LmmError::InvalidParameter(format!(
-                "AR1 expects 2 parameters, got {}",
+                "{} expects {} parameters, got {}",
+                self.name(),
+                self.n_params(),
                 params.len()
             )));
         }
-        if params[0] <= 0.0 {
+        let (sigma2, rho) = if self.correlation_only {
+            (1.0, params[0])
+        } else {
+            (params[0], params[1])
+        };
+        if sigma2 <= 0.0 {
             return Err(LmmError::InvalidParameter(
                 "AR1 sigma^2 must be positive".to_string(),
             ));
         }
-        if params[1].abs() >= 1.0 {
+        if rho.abs() >= 1.0 {
             return Err(LmmError::InvalidParameter(
                 "AR1 rho must satisfy |rho| < 1".to_string(),
             ));
         }
-        self.sigma2 = params[0];
-        self.rho = params[1];
+        self.sigma2 = sigma2;
+        self.rho = rho;
         Ok(())
     }
 
@@ -142,7 +186,9 @@ impl VarStruct for AR1 {
 
     fn derivatives_of_inverse(&self, dim: usize) -> Vec<SparseMat> {
         if dim == 0 {
-            return vec![TriMat::new((0, 0)).to_csc(), TriMat::new((0, 0)).to_csc()];
+            return (0..self.n_params())
+                .map(|_| TriMat::new((0, 0)).to_csc())
+                .collect();
         }
 
         let rho = self.rho;
@@ -164,7 +210,11 @@ impl VarStruct for AR1 {
         if dim == 1 {
             // For dim=1, Sigma^{-1} = 1/sigma^2, no rho dependence.
             let d_rho = TriMat::new((1, 1)).to_csc();
-            return vec![d_sigma2, d_rho];
+            return if self.correlation_only {
+                vec![d_rho]
+            } else {
+                vec![d_sigma2, d_rho]
+            };
         }
 
         let rho2 = rho * rho;
@@ -204,11 +254,27 @@ impl VarStruct for AR1 {
 
         let d_rho = tri.to_csc();
 
-        vec![d_sigma2, d_rho]
+        if self.correlation_only {
+            vec![d_rho]
+        } else {
+            vec![d_sigma2, d_rho]
+        }
     }
 
     fn bounds(&self) -> Vec<(f64, f64)> {
-        vec![(1e-10, f64::INFINITY), (-0.999, 0.999)]
+        if self.correlation_only {
+            vec![(-0.999, 0.999)]
+        } else {
+            vec![(1e-10, f64::INFINITY), (-0.999, 0.999)]
+        }
+    }
+
+    fn param_names(&self) -> Vec<String> {
+        if self.correlation_only {
+            vec!["rho".to_string()]
+        } else {
+            vec!["sigma2".to_string(), "rho".to_string()]
+        }
     }
 
     fn clone_boxed(&self) -> Box<dyn VarStruct> {
@@ -216,7 +282,7 @@ impl VarStruct for AR1 {
     }
 
     fn initial_params(&self) -> Vec<f64> {
-        vec![self.sigma2, self.rho]
+        self.params()
     }
 }
 

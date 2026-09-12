@@ -40,9 +40,23 @@ pub struct FitResult {
 /// A single variance component estimate.
 #[derive(Debug, Clone, Serialize)]
 pub struct VarianceEstimate {
+    /// Term name (random term column, interaction `a:b`, or `residual`).
     pub name: String,
+    /// Variance structure name (Identity, AR1, FactorAnalytic, ...).
     pub structure: String,
+    /// Parameter names and estimates in the structure's parameter order.
     pub parameters: Vec<(String, f64)>,
+    /// Approximate standard error per parameter (0 when unavailable).
+    pub se: Vec<f64>,
+    /// Whether each parameter converged to the boundary of its parameter space.
+    pub at_boundary: Vec<bool>,
+}
+
+impl VarianceEstimate {
+    /// The first parameter (sigma² for scaled structures), if any.
+    pub fn sigma2(&self) -> Option<f64> {
+        self.parameters.first().map(|(_, v)| *v)
+    }
 }
 
 /// A named fixed or random effect estimate.
@@ -117,18 +131,16 @@ impl FitResult {
         s.push_str(&format!("BIC: {:.4}\n\n", self.bic()));
 
         s.push_str("--- Variance Components ---\n");
-        let has_se = self.variance_se.iter().any(|se| *se > 0.0);
-        for (k, vc) in self.variance_components.iter().enumerate() {
+        for vc in &self.variance_components {
             s.push_str(&format!("  {} ({}): ", vc.name, vc.structure));
-            for (pname, pval) in &vc.parameters {
-                s.push_str(&format!("{}={:.6}  ", pname, pval));
-            }
-            if self.at_boundary.get(k).copied().unwrap_or(false) {
-                s.push_str("[boundary]");
-            } else if has_se {
-                if let Some(se) = self.variance_se.get(k) {
-                    s.push_str(&format!("(SE: {:.6})", se));
+            for (i, (pname, pval)) in vc.parameters.iter().enumerate() {
+                s.push_str(&format!("{}={:.6}", pname, pval));
+                if vc.at_boundary.get(i).copied().unwrap_or(false) {
+                    s.push_str(" [boundary]");
+                } else if let Some(se) = vc.se.get(i).filter(|se| **se > 0.0) {
+                    s.push_str(&format!(" (SE: {:.6})", se));
                 }
+                s.push_str("  ");
             }
             s.push('\n');
         }
