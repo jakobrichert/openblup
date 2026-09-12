@@ -464,6 +464,120 @@ fn fa1_env_by_pedigree_interaction() {
     assert_at_optimum(&mut model, &result, 2e-3);
 }
 
+/// A two-trait animal model expressed with the general structures: the
+/// records are stacked in long format (one row per trait x animal), the
+/// genetic term is `trait:animal` with `US(trait) ⊗ A` and the residual is
+/// `US(trait) ⊗ I` over the (trait, unit) grid — i.e. G0 ⊗ A and R0 ⊗ I.
+#[test]
+fn two_trait_animal_model_via_kronecker_structures() {
+    use plant_breeding_lmm_core::variance::StructureSpec;
+
+    let mut rng = rand::rngs::StdRng::seed_from_u64(11);
+    let ped = two_generation_pedigree(8, 40);
+    let n_anim = ped.n_animals();
+    let ids: Vec<String> = (0..n_anim).map(|i| ped.animal_id(i).to_string()).collect();
+    let offspring: Vec<&String> = ids.iter().filter(|id| id.starts_with('O')).collect();
+
+    let g0 = DMatrix::from_row_slice(2, 2, &[2.0, 0.8, 0.8, 1.0]);
+    let r0 = DMatrix::from_row_slice(2, 2, &[1.0, 0.3, 0.3, 0.5]);
+    let mut bv = vec![[0.0f64; 2]; n_anim];
+    for i in 0..n_anim {
+        match (ped.sire(i), ped.dam(i)) {
+            (Some(sire), Some(dam)) => {
+                let m = mvn(&mut rng, &(0.5 * &g0));
+                bv[i] = [
+                    0.5 * (bv[sire][0] + bv[dam][0]) + m[0],
+                    0.5 * (bv[sire][1] + bv[dam][1]) + m[1],
+                ];
+            }
+            _ => {
+                let m = mvn(&mut rng, &g0);
+                bv[i] = [m[0], m[1]];
+            }
+        }
+    }
+    let mu = [20.0, 5.0];
+    let (mut y, mut trait_col, mut animal, mut unit) = (vec![], vec![], vec![], vec![]);
+    for id in &offspring {
+        let i = ped.animal_index(id).unwrap();
+        let e = mvn(&mut rng, &r0);
+        for t in 0..2 {
+            y.push(mu[t] + bv[i][t] + e[t]);
+            trait_col.push(format!("T{}", t));
+            animal.push((*id).clone());
+            unit.push((*id).clone());
+        }
+    }
+    let n_obs = y.len();
+    let mut df = DataFrame::new();
+    df.add_float_column("y", y).unwrap();
+    let t_refs: Vec<&str> = trait_col.iter().map(|s| s.as_str()).collect();
+    let a_refs: Vec<&str> = animal.iter().map(|s| s.as_str()).collect();
+    let u_refs: Vec<&str> = unit.iter().map(|s| s.as_str()).collect();
+    df.add_factor_column("trait", &t_refs).unwrap();
+    df.add_factor_column("animal", &a_refs).unwrap();
+    df.add_factor_column("unit", &u_refs).unwrap();
+
+    let mut model = MixedModelBuilder::new()
+        .data(&df)
+        .response("y")
+        .fixed("trait")
+        .random_interaction_spec(
+            "trait",
+            StructureSpec::Unstructured,
+            "animal",
+            None,
+            Some(&ped),
+        )
+        .residual_interaction_spec(
+            "trait",
+            StructureSpec::Unstructured,
+            "unit",
+            StructureSpec::Known,
+        )
+        .max_iterations(300)
+        .convergence(1e-8)
+        .build()
+        .unwrap();
+    assert_eq!(model.n_obs, n_obs);
+    assert_eq!(model.z_blocks[0].cols(), 2 * n_anim);
+    let result = model.fit_reml().unwrap();
+    println!("{}", result.summary());
+    // Reconstruct G0 and R0 from the Cholesky parameters L_r_c.
+    let cov_from = |vc: &plant_breeding_lmm_core::lmm::VarianceEstimate| -> DMatrix<f64> {
+        let get = |name: &str| {
+            vc.parameters
+                .iter()
+                .find(|(n, _)| n.ends_with(name))
+                .map(|(_, v)| *v)
+                .unwrap_or_else(|| panic!("parameter {} missing in {:?}", name, vc.parameters))
+        };
+        let l = DMatrix::from_row_slice(2, 2, &[get("L_1_1"), 0.0, get("L_2_1"), get("L_2_2")]);
+        &l * l.transpose()
+    };
+    assert_eq!(result.variance_components[0].name, "trait:animal");
+    assert_eq!(result.variance_components[0].parameters.len(), 3);
+    assert_eq!(result.variance_components[1].parameters.len(), 3);
+    let g0_hat = cov_from(&result.variance_components[0]);
+    let r0_hat = cov_from(&result.variance_components[1]);
+    println!("G0 = {} R0 = {}", g0_hat, r0_hat);
+    for m in [&g0_hat, &r0_hat] {
+        assert!(m[(0, 0)] > 0.0 && m[(1, 1)] > 0.0);
+        let corr = m[(0, 1)] / (m[(0, 0)] * m[(1, 1)]).sqrt();
+        assert!((-1.0..=1.0).contains(&corr));
+    }
+    // Trait 1 has the larger genetic variance and a positive genetic correlation.
+    assert!(g0_hat[(0, 0)] > g0_hat[(1, 1)]);
+    assert!(g0_hat[(0, 1)] > 0.0);
+    // Breeding values for both traits and every animal, founders included.
+    assert_eq!(result.random_effects[0].effects.len(), 2 * n_anim);
+    assert!(result.random_effects[0]
+        .effects
+        .iter()
+        .any(|e| e.level == "T1:F0"));
+    assert_at_optimum(&mut model, &result, 2e-3);
+}
+
 /// Separable AR1 x AR1 residual on a field grid with missing plots.
 #[test]
 fn ar1_x_ar1_residual_with_missing_plots() {

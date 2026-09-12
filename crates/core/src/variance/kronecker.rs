@@ -233,6 +233,15 @@ impl VarStruct for KroneckerStruct {
         b
     }
 
+    fn is_standard_deviation_param(&self, i: usize) -> bool {
+        let na = self.a.n_params();
+        if i < na {
+            self.a.is_standard_deviation_param(i)
+        } else {
+            self.b.is_standard_deviation_param(i - na)
+        }
+    }
+
     fn param_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .a

@@ -47,7 +47,7 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 - **AR1** (first-order autoregressive) with closed-form tridiagonal inverse, as a variance (`ar1`) or a correlation-only (`ar1c`) structure
 - **Kronecker product** for separable models: AR1 x AR1 spatial residuals over a row x column grid (missing plots allowed), FA x genotype/pedigree for genotype-by-environment
 - **Diagonal** (heterogeneous variances)
-- **Unstructured** covariance (Cholesky parameterized)
+- **Unstructured** covariance (Cholesky parameterized); `US(trait) ⊗ A` and `US(trait) ⊗ I` give multi-trait animal models in long format
 - **Factor analytic** (FA1, FA2, ...) with Woodbury inverse (Smith et al. 2001)
 - **Identity** (IID random effects) and **known** (fixed) matrices such as a pedigree A-inverse
 - Every parameter (variances, correlations, loadings, specific variances) is reported with its standard error from the inverse average-information matrix and a boundary flag
@@ -81,7 +81,7 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 ### Current limitations (honest status)
 - Models with an IID residual (animal, genomic and plant-trial models) assemble the MME **sparsely** and solve them with a sparse Cholesky factorization (fill-reducing ordering) plus a Takahashi inverse subset, so the number of equations is limited by memory for the factor rather than by a dense inverse. Models with structured residuals or dense variance structures (AR1 x AR1 residuals, FA / unstructured terms) use the general engine, which assembles and inverts `C` densely; keep those to a few thousand equations.
 - The `gpu` feature compiles a backend *interface* only; all computation runs on the CPU until a `wgpu` backend is contributed.
-- Multi-trait models use EM-REML only.
+- The dedicated multi-trait engine (`MultiTraitReml`) uses EM-REML. For AI-REML with standard errors and the full diagnostics, fit multi-trait models through the general structures instead: stack the records in long format (one row per trait x unit) and use `trait:animal` with `US(trait) ⊗ A` plus a `US(trait) ⊗ I` residual over the (trait, unit) grid (see the CLI and Python quick starts). The residual of that route is assembled densely, so keep it to a few thousand records.
 - Satterthwaite denominator df need the average-information matrix, so they are available after an AI-REML fit with no variance parameter on the boundary (any variance structure). Kenward-Roger additionally needs scaled-identity / relationship-matrix terms and an IID residual. Unavailable methods fall back to the next simpler one (the output says which). Leverage-based residual diagnostics need an IID residual.
 - `--cv` / `cross_validate()` handle models with a single random term (genomic or pedigree prediction).
 
@@ -194,6 +194,16 @@ print(result.wald_tests(ddf="kenward-roger"))
 print(result.residual_diagnostics()["cooks_distance"])
 print(model.cross_validate(n_folds=5, seed=1)["accuracy"])
 
+# Multi-trait animal model in long format (one row per trait x animal; `unit` = animal id):
+# genetic covariance G0 (x) A, residual covariance R0 (x) I
+model = MixedModel()
+model.load_csv("two_trait_long.csv")          # columns: trait, animal, unit, y
+model.set_response("y")
+model.add_fixed("trait")
+model.add_random_interaction("trait", "animal", outer_structure="us", pedigree=ped)
+model.set_residual_interaction("trait", "unit", "us", "fixed")
+result = model.fit()                          # parameters trait.L_r_c are Cholesky factors of G0 and R0
+
 # Relationship matrices directly
 a_inv = compute_a_inverse(ped)                # scipy.sparse.csc_matrix (rows = ped.animal_ids())
 g = compute_g_matrix(markers_0_1_2)           # numpy (n x n)
@@ -227,6 +237,12 @@ openblup fit --data examples/field_trial.csv --response yield \
 openblup fit --data examples/field_trial.csv --response yield \
     --fixed "mu + rep" --factor rep --random genotype \
     --ddf satterthwaite --cv 5 --diagnostics diagnostics.csv
+
+# Multi-trait animal model in long format (columns trait, animal, unit, y):
+# G0 (x) A for trait:animal, R0 (x) I over the trait x unit grid
+openblup fit --data two_trait_long.csv --response y --fixed trait \
+    --random "trait:us*animal" --pedigree ped.csv --pedigree-term animal \
+    --residual "trait:us*unit:fixed"
 
 # Inspect the A-inverse and inbreeding coefficients
 openblup ainverse --pedigree examples/mrode_pedigree.csv --inbreeding --output ainv.csv

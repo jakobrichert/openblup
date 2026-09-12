@@ -61,6 +61,9 @@ struct ParamLayout {
     total: usize,
     bounds: Vec<(f64, f64)>,
     is_variance: Vec<bool>,
+    /// Non-negative parameters on the standard-deviation scale (Cholesky
+    /// diagonals): scaled to the data with the square root of a variance.
+    is_sd: Vec<bool>,
 }
 
 impl ParamLayout {
@@ -68,24 +71,33 @@ impl ParamLayout {
         let mut term_ranges = Vec::with_capacity(model.random_var_structs.len());
         let mut bounds = Vec::new();
         let mut is_variance = Vec::new();
+        let mut is_sd = Vec::new();
         let mut offset = 0;
         for vs in &model.random_var_structs {
             let n = vs.n_params();
             term_ranges.push(offset..offset + n);
             bounds.extend(vs.bounds());
-            is_variance.extend((0..n).map(|i| vs.is_variance_param(i)));
+            is_sd.extend((0..n).map(|i| vs.is_standard_deviation_param(i)));
+            is_variance.extend(
+                (0..n).map(|i| vs.is_variance_param(i) && !vs.is_standard_deviation_param(i)),
+            );
             offset += n;
         }
         let n_res = model.residual_var_struct.n_params();
         let residual_range = offset..offset + n_res;
         bounds.extend(model.residual_var_struct.bounds());
-        is_variance.extend((0..n_res).map(|i| model.residual_var_struct.is_variance_param(i)));
+        let res = &model.residual_var_struct;
+        is_sd.extend((0..n_res).map(|i| res.is_standard_deviation_param(i)));
+        is_variance.extend(
+            (0..n_res).map(|i| res.is_variance_param(i) && !res.is_standard_deviation_param(i)),
+        );
         Self {
             term_ranges,
             residual_range,
             total: offset + n_res,
             bounds,
             is_variance,
+            is_sd,
         }
     }
 
@@ -252,19 +264,31 @@ impl GeneralReml {
             theta.extend(vs.initial_params());
         }
         theta.extend(model.residual_var_struct.initial_params());
-        // Variance parameters left at the default value of 1.0 are scaled to
-        // the data; anything else is taken as a user-supplied starting value.
+        // Variance (and standard-deviation) parameters left at the default
+        // value of 1.0 are scaled to the data; anything else is taken as a
+        // user-supplied starting value.
         for (i, t) in theta.iter_mut().enumerate() {
-            if layout.is_variance[i] && (*t - 1.0).abs() < 1e-12 {
-                *t = init_var;
+            if (*t - 1.0).abs() < 1e-12 {
+                if layout.is_variance[i] {
+                    *t = init_var;
+                } else if layout.is_sd[i] {
+                    *t = init_var.sqrt();
+                }
             }
         }
 
         let total_var: f64 = theta
             .iter()
-            .zip(layout.is_variance.iter())
-            .filter(|(_, v)| **v)
-            .map(|(t, _)| *t)
+            .enumerate()
+            .map(|(i, t)| {
+                if layout.is_variance[i] {
+                    *t
+                } else if layout.is_sd[i] {
+                    t * t
+                } else {
+                    0.0
+                }
+            })
             .sum::<f64>()
             .max(init_var);
         let floor = (1e-6 * total_var).max(1e-12);
@@ -272,6 +296,8 @@ impl GeneralReml {
             .map(|i| {
                 if layout.is_variance[i] {
                     layout.bounds[i].0.max(floor)
+                } else if layout.is_sd[i] {
+                    layout.bounds[i].0.max(floor.sqrt())
                 } else {
                     layout.bounds[i].0
                 }
@@ -288,17 +314,17 @@ impl GeneralReml {
         let mut ev = self.evaluate(model, &layout, &theta)?;
 
         for iter in 0..self.max_iter {
-            // Sticky boundary flags (a parameter that reached a bound stays there).
+            let logl_cur = ev.logl;
+            let (score, ai) = self.scores_and_ai(model, &ev, &layout);
+
+            // Active set: a parameter sitting on a bound is held there only
+            // while the likelihood still pushes it outward; it is released
+            // as soon as the gradient points back into the parameter space.
             for i in 0..n_params {
                 let at_lower = theta[i] <= lower[i] * (1.0 + 1e-9) + 1e-300;
                 let at_upper = upper[i].is_finite() && theta[i] >= upper[i] - 1e-9;
-                if at_lower || at_upper {
-                    fixed[i] = true;
-                }
+                fixed[i] = (at_lower && score[i] <= 0.0) || (at_upper && score[i] >= 0.0);
             }
-
-            let logl_cur = ev.logl;
-            let (score, ai) = self.scores_and_ai(model, &ev, &layout);
             let free: Vec<usize> = (0..n_params).filter(|&i| !fixed[i]).collect();
             if free.is_empty() {
                 converged = true;
@@ -334,9 +360,12 @@ impl GeneralReml {
                 for (a, &i) in free.iter().enumerate() {
                     let old = theta[i];
                     let mut new = old + frac * dir[a];
-                    if layout.is_variance[i] {
-                        // no more than a factor of 10 growth per step
-                        new = new.min(10.0 * old.max(lower[i]));
+                    if layout.is_variance[i] || layout.is_sd[i] {
+                        // no more than a factor of 10 change per step, in
+                        // either direction (a variance cannot collapse onto
+                        // the boundary in a single step)
+                        let base = old.max(lower[i]);
+                        new = new.clamp(base / 10.0, base * 10.0);
                     } else if upper[i].is_finite() && lower[i].is_finite() {
                         // correlations: at most half the range per step
                         let half = 0.5 * (upper[i] - lower[i]);
@@ -420,16 +449,17 @@ impl GeneralReml {
         // ---- final state ----
         let at_boundary: Vec<bool> = (0..n_params)
             .map(|i| {
-                fixed[i]
-                    || theta[i] <= lower[i] * (1.0 + 1e-9) + 1e-300
+                theta[i] <= lower[i] * (1.0 + 1e-9) + 1e-300
                     || (upper[i].is_finite() && theta[i] >= upper[i] - 1e-9)
             })
             .collect();
 
         let mut variance_se = vec![0.0; n_params];
         let mut ai_matrix = None;
-        let variance_at_floor = (0..n_params)
-            .any(|i| layout.is_variance[i] && theta[i] <= lower[i] * (1.0 + 1e-9) + 1e-300);
+        let variance_at_floor = (0..n_params).any(|i| {
+            (layout.is_variance[i] || layout.is_sd[i])
+                && theta[i] <= lower[i] * (1.0 + 1e-9) + 1e-300
+        });
         if !variance_at_floor {
             let (_, ai) = self.scores_and_ai(model, &ev, &layout);
             ai_matrix = Some(ai.clone());

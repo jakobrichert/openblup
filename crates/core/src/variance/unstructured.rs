@@ -327,6 +327,19 @@ impl VarStruct for Unstructured {
         bounds
     }
 
+    /// The diagonal entries of `L` are standard deviations (of the
+    /// conditional distributions), not variances.
+    fn is_standard_deviation_param(&self, i: usize) -> bool {
+        let mut idx = 0;
+        for col in 0..self.dim {
+            if idx == i {
+                return true;
+            }
+            idx += self.dim - col;
+        }
+        false
+    }
+
     fn clone_boxed(&self) -> Box<dyn VarStruct> {
         Box::new(self.clone())
     }

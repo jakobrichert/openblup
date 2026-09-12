@@ -62,6 +62,14 @@ pub trait VarStruct: Send + Sync + std::fmt::Debug {
         i < b.len() && b[i].0 >= 0.0 && b[i].1.is_infinite()
     }
 
+    /// Whether parameter `i` is on the scale of a standard deviation rather
+    /// than a variance (e.g. the diagonal of a Cholesky factor). Such
+    /// parameters are non-negative like variances but are scaled to the data
+    /// with the square root of a variance.
+    fn is_standard_deviation_param(&self, _i: usize) -> bool {
+        false
+    }
+
     /// The dimension this structure is defined for, if it is intrinsic to the
     /// structure (e.g. a `Diagonal` with 4 variances). `None` means the
     /// structure works for any dimension (Identity, AR1).
