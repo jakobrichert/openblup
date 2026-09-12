@@ -69,6 +69,20 @@ enum Ddf {
     /// Satterthwaite approximation (AI-REML fits with no variance parameter
     /// on the boundary; otherwise falls back to containment)
     Satterthwaite,
+    /// Kenward-Roger bias-adjusted F-test (AI-REML fits of models with
+    /// scaled-identity / relationship-matrix terms and an IID residual;
+    /// otherwise falls back to Satterthwaite, then containment)
+    KenwardRoger,
+}
+
+impl Ddf {
+    fn name(self) -> &'static str {
+        match self {
+            Ddf::Containment => "containment",
+            Ddf::Satterthwaite => "satterthwaite",
+            Ddf::KenwardRoger => "kenward-roger",
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -555,10 +569,13 @@ fn cmd_fit(opts: FitOptions) -> Result<()> {
 
     // ---- Wald tests ----
     let (tests, ddf_used) = wald_tests_for(&result, opts.ddf);
-    if opts.ddf == Ddf::Satterthwaite && ddf_used == Ddf::Containment {
+    if ddf_used != opts.ddf {
         eprintln!(
-            "Warning: Satterthwaite df need an AI-REML fit with no variance parameter on \
-             the boundary; reporting containment df instead."
+            "Warning: {} df need an AI-REML fit with no variance parameter on the boundary \
+             (Kenward-Roger also needs scaled-identity terms and an IID residual); \
+             reporting {} df instead.",
+            opts.ddf.name(),
+            ddf_used.name()
         );
     }
 
@@ -587,7 +604,7 @@ fn cmd_fit(opts: FitOptions) -> Result<()> {
             println!("{}", result.summary());
             if !tests.is_empty() {
                 println!("{}", format_wald_tests(&tests));
-                println!("Denominator df: {:?}\n", ddf_used);
+                println!("Denominator df: {}\n", ddf_used.name());
             }
             if let Some(cv) = &cv_result {
                 println!("{}", cv.summary());
@@ -606,7 +623,12 @@ fn cmd_fit(opts: FitOptions) -> Result<()> {
 }
 
 fn wald_tests_for(result: &FitResult, ddf: Ddf) -> (Vec<WaldTest>, Ddf) {
-    if ddf == Ddf::Satterthwaite {
+    if ddf == Ddf::KenwardRoger {
+        if let Some(tests) = result.wald_tests_kenward_roger() {
+            return (tests, Ddf::KenwardRoger);
+        }
+    }
+    if ddf != Ddf::Containment {
         if let Some(tests) = result.wald_tests_satterthwaite() {
             return (tests, Ddf::Satterthwaite);
         }
@@ -705,7 +727,7 @@ fn result_to_json(result: &FitResult, tests: &[WaldTest], ddf: Ddf) -> serde_jso
         "n_variance_params": result.n_variance_params,
         "variance_components": variance_components,
         "fixed_effects": fixed_effects,
-        "ddf_method": format!("{:?}", ddf).to_lowercase(),
+        "ddf_method": ddf.name(),
         "wald_tests": wald,
         "random_effects": random_effects,
     })

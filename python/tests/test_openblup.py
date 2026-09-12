@@ -250,6 +250,11 @@ class TestPackage(unittest.TestCase):
             self.assertGreater(satt[term]["den_df"], 0.0)
             self.assertLessEqual(satt[term]["den_df"], contain[term]["den_df"] + 1e-9)
             self.assertTrue(0.0 <= satt[term]["p_value"] <= 1.0)
+        kr = {t["term"]: t for t in result.wald_tests(ddf="kenward-roger")}
+        for term in kr:
+            self.assertEqual(kr[term]["ddf_method"], "kenward-roger")
+            self.assertGreater(kr[term]["f_statistic"], 0.0)
+            self.assertTrue(1.0 <= kr[term]["den_df"] <= contain[term]["den_df"] + 1e-9)
         with self.assertRaises(ValueError):
             result.wald_tests(ddf="kenward")
 

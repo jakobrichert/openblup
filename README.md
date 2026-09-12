@@ -26,7 +26,7 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 - **Henderson's Mixed Model Equations** (MME): sparse assembly, sparse Cholesky (faer, AMD ordering) and a Takahashi inverse subset for the traces, prediction error variances and leverages REML needs; dense assembly for structured residuals
 - **BLUP/BLUE** extraction with standard errors, reliabilities and the full fixed-effects covariance matrix
 - **Treatment contrasts** for factors (`mu + rep` is full rank, like R's `model.matrix`)
-- **Wald F-tests** for fixed effects using the full covariance block, containment or Satterthwaite denominator df
+- **Wald F-tests** for fixed effects using the full covariance block, with containment, Satterthwaite or Kenward-Roger (bias-adjusted F, matched denominator df) degrees of freedom
 - **Diagnostics**: log-likelihood, AIC, BIC, convergence monitoring, residual diagnostics
 - **Missing data**: `NA`/empty fields in CSV files become `NaN`; rows with a missing response are dropped
 
@@ -70,7 +70,7 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 - Install with `pip install .` (maturin)
 
 ### CLI Tool (`openblup`)
-- `openblup fit` — fit models from CSV; term specs such as `--random "env:fa1*genotype"` and `--residual "row:ar1*col:ar1c"`, `--ddf satterthwaite`, `--cv K`, `--diagnostics`, text or JSON output, BLUP export to CSV
+- `openblup fit` — fit models from CSV; term specs such as `--random "env:fa1*genotype"` and `--residual "row:ar1*col:ar1c"`, `--ddf satterthwaite|kenward-roger`, `--cv K`, `--diagnostics`, text or JSON output, BLUP export to CSV
 - `openblup ainverse` — compute, inspect and export the A-inverse and inbreeding coefficients
 
 ### WebAssembly Target
@@ -81,8 +81,8 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 ### Current limitations (honest status)
 - Models with an IID residual (animal, genomic and plant-trial models) assemble the MME **sparsely** and solve them with a sparse Cholesky factorization (fill-reducing ordering) plus a Takahashi inverse subset, so the number of equations is limited by memory for the factor rather than by a dense inverse. Models with structured residuals or dense variance structures (AR1 x AR1 residuals, FA / unstructured terms) use the general engine, which assembles and inverts `C` densely; keep those to a few thousand equations.
 - The `gpu` feature compiles a backend *interface* only; all computation runs on the CPU until a `wgpu` backend is contributed.
-- Multi-trait models use EM-REML only; Kenward-Roger degrees of freedom are not implemented.
-- Satterthwaite denominator df need the average-information matrix, so they are available after an AI-REML fit with no variance parameter on the boundary (any variance structure); otherwise the Wald tests fall back to containment df (the output says which). Leverage-based residual diagnostics need an IID residual.
+- Multi-trait models use EM-REML only.
+- Satterthwaite denominator df need the average-information matrix, so they are available after an AI-REML fit with no variance parameter on the boundary (any variance structure). Kenward-Roger additionally needs scaled-identity / relationship-matrix terms and an IID residual. Unavailable methods fall back to the next simpler one (the output says which). Leverage-based residual diagnostics need an IID residual.
 - `--cv` / `cross_validate()` handle models with a single random term (genomic or pedigree prediction).
 
 ## Quick Start (Rust)
@@ -190,6 +190,7 @@ model.add_fixed("mu + rep")
 model.add_random("genotype")
 result = model.fit()
 print(result.wald_tests(ddf="satterthwaite"))
+print(result.wald_tests(ddf="kenward-roger"))
 print(result.residual_diagnostics()["cooks_distance"])
 print(model.cross_validate(n_folds=5, seed=1)["accuracy"])
 
@@ -301,6 +302,8 @@ The algorithms implemented here are based on well-established quantitative genet
 - **Patterson, H.D. & Thompson, R.** (1971). Recovery of inter-block information when block sizes are unequal. *Biometrika*, 58(3), 545-554. — Original REML paper.
 - **Searle, S.R., Casella, G. & McCulloch, C.E.** (1992). *Variance Components*. Wiley. — Comprehensive treatment of variance component estimation.
 - **Gilmour, A.R., Thompson, R. & Cullis, B.R.** (1995). Average Information REML: An efficient algorithm for variance parameter estimation in linear mixed models. *Biometrics*, 51(4), 1440-1450. — AI-REML algorithm used in ASReml.
+- **Kenward, M.G. & Roger, J.H.** (1997). Small sample inference for fixed effects from restricted maximum likelihood. *Biometrics*, 53(3), 983-997. — Bias-adjusted covariance, scaled F and denominator df; Satterthwaite df follow Giesbrecht & Burns (1985) and Fai & Cornelius (1996) for multi-df terms.
+- **Takahashi, K., Fagan, J. & Chin, M.-S.** (1973). Formation of a sparse bus impedance matrix and its application to short circuit study. *Proc. 8th PICA Conference*, 63-69. — The sparse inverse subset used for the traces and prediction error variances.
 
 ### Pedigree & Relationship Matrices
 - **Henderson, C.R.** (1976). A simple method for computing the inverse of a numerator relationship matrix used in prediction of breeding values. *Biometrics*, 32(1), 69-83. — Henderson's rules for A-inverse.

@@ -157,9 +157,10 @@ class FitResult:
     def residuals(self) -> npt.NDArray[np.float64]: ...
     def wald_tests(self, ddf: str = "containment") -> List[Dict[str, Any]]:
         """Wald F-tests per fixed term (keys term, f_statistic, num_df, den_df,
-        p_value, ddf_method). ``ddf`` is "containment" or "satterthwaite"
-        (AI-REML fits with no parameter on the boundary; otherwise falls back
-        to containment)."""
+        p_value, ddf_method). ``ddf`` is "containment", "satterthwaite" (AI-REML
+        fits with no parameter on the boundary) or "kenward-roger" (bias-adjusted
+        F; scaled-identity / relationship-matrix terms with an IID residual).
+        Unavailable methods fall back to the next simpler one."""
         ...
     def log_likelihood(self) -> float: ...
     def aic(self) -> float: ...

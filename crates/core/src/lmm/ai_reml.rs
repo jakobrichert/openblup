@@ -1,4 +1,6 @@
-use crate::diagnostics::fixed_cov_derivatives_scaled_identity;
+use crate::diagnostics::{
+    fixed_cov_derivatives_scaled_identity, kenward_roger_terms_scaled_identity,
+};
 use crate::error::Result;
 use crate::matrix::sparse::spmv;
 use crate::model::MixedModel;
@@ -331,6 +333,26 @@ impl AiReml {
                     .collect()
             })
             .collect();
+            // Kenward-Roger terms (P_i, Q_ij) through the random block of
+            // the MME; a failure here only disables the Kenward-Roger tests.
+            let ginv_scaled: Vec<SparseMat> = (0..n_random_terms)
+                .map(|k| {
+                    let q = model.z_blocks[k].cols();
+                    match model.ginv_matrices[k] {
+                        Some(ref g) => g.map(|v| v / sigma2_random[k]),
+                        None => {
+                            crate::matrix::sparse::sparse_diagonal(&vec![1.0 / sigma2_random[k]; q])
+                        }
+                    }
+                })
+                .collect();
+            result.kenward_roger_terms = kenward_roger_terms_scaled_identity(
+                &model.x,
+                &model.z_blocks,
+                &ginv_scaled,
+                &var_params,
+            )
+            .ok();
         }
         Ok(result)
     }
@@ -830,6 +852,7 @@ impl AiReml {
             ai_matrix: None,
             n_random_per_term: model.z_blocks.iter().map(|z| z.cols()).collect(),
             fixed_cov_derivatives: Vec::new(),
+            kenward_roger_terms: None,
         })
     }
 }

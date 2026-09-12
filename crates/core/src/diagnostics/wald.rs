@@ -458,6 +458,7 @@ mod tests {
             n_variance_params: 0,
             c_inv: None,
             fixed_cov_derivatives: Vec::new(),
+            kenward_roger_terms: None,
             ai_matrix: None,
             n_random_per_term: vec![],
         };
@@ -498,6 +499,7 @@ mod tests {
             n_variance_params: 1,
             c_inv: None,
             fixed_cov_derivatives: Vec::new(),
+            kenward_roger_terms: None,
             ai_matrix: None,
             n_random_per_term: vec![],
         };
@@ -560,6 +562,7 @@ mod tests {
             n_variance_params: 1,
             c_inv: None,
             fixed_cov_derivatives: Vec::new(),
+            kenward_roger_terms: None,
             ai_matrix: None,
             n_random_per_term: vec![],
         };
@@ -657,6 +660,7 @@ mod tests {
             n_variance_params: 1,
             c_inv: None,
             fixed_cov_derivatives: Vec::new(),
+            kenward_roger_terms: None,
             ai_matrix: None,
             n_random_per_term: vec![],
         };

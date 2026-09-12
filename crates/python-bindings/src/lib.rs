@@ -979,22 +979,34 @@ impl PyFitResult {
     /// Wald F-tests for the fixed-effect terms as a list of dicts with keys
     /// term, f_statistic, num_df, den_df, p_value, ddf_method.
     ///
-    /// `ddf` is "containment" (n - rank(X), default) or "satterthwaite"
+    /// `ddf` is "containment" (n - rank(X), default), "satterthwaite"
     /// (available after an AI-REML fit with no variance parameter on the
-    /// boundary; falls back to containment otherwise, see the ddf_method key).
+    /// boundary) or "kenward-roger" (bias-adjusted F; additionally needs
+    /// scaled-identity / relationship-matrix terms and an IID residual).
+    /// Unavailable methods fall back to the next simpler one, see the
+    /// ddf_method key.
     #[pyo3(signature = (ddf="containment"))]
     fn wald_tests<'py>(&self, py: Python<'py>, ddf: &str) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        match ddf.to_lowercase().as_str() {
-            "containment" => wald_to_dicts(py, &wald_tests(&self.inner), "containment"),
-            "satterthwaite" => match self.inner.wald_tests_satterthwaite() {
-                Some(tests) => wald_to_dicts(py, &tests, "satterthwaite"),
-                None => wald_to_dicts(py, &wald_tests(&self.inner), "containment"),
-            },
-            other => Err(PyValueError::new_err(format!(
-                "Unknown ddf method '{}'; use 'containment' or 'satterthwaite'",
-                other
-            ))),
+        let method = ddf.to_lowercase().replace('_', "-");
+        let want_kr = matches!(method.as_str(), "kenward-roger" | "kr");
+        let want_satt = want_kr || method == "satterthwaite";
+        if !(want_satt || method == "containment") {
+            return Err(PyValueError::new_err(format!(
+                "Unknown ddf method '{}'; use 'containment', 'satterthwaite' or 'kenward-roger'",
+                ddf
+            )));
         }
+        if want_kr {
+            if let Some(tests) = self.inner.wald_tests_kenward_roger() {
+                return wald_to_dicts(py, &tests, "kenward-roger");
+            }
+        }
+        if want_satt {
+            if let Some(tests) = self.inner.wald_tests_satterthwaite() {
+                return wald_to_dicts(py, &tests, "satterthwaite");
+            }
+        }
+        wald_to_dicts(py, &wald_tests(&self.inner), "containment")
     }
 
     /// Return the restricted log-likelihood.

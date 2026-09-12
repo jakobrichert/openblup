@@ -171,6 +171,27 @@ fn sparse_fit_agrees_with_dense_equations_at_convergence() {
     let satt = result.wald_tests_satterthwaite().unwrap();
     assert_eq!(satt.len(), 1);
     assert!(satt[0].den_df >= 1.0 && satt[0].den_df <= (sim.n_records - p) as f64);
+    // Kenward-Roger: P_i consistent with the derivatives (∂Φ/∂θ = −Φ P Φ)
+    // and a finite adjusted test.
+    let kr_terms = result.kenward_roger_terms.as_ref().unwrap();
+    let phi = nalgebra::DMatrix::from_fn(p, p, |i, j| result.fixed_cov[i][j]);
+    for (i, pm) in kr_terms.p.iter().enumerate() {
+        let from_p = -(&phi * pm * &phi);
+        for a in 0..p {
+            for b in 0..p {
+                assert_relative_eq!(
+                    from_p[(a, b)],
+                    result.fixed_cov_derivatives[i][a][b],
+                    epsilon = 1e-9,
+                    max_relative = 1e-6
+                );
+            }
+        }
+    }
+    let kr = result.wald_tests_kenward_roger().unwrap();
+    assert_eq!(kr.len(), 1);
+    assert!(kr[0].f_statistic > 0.0 && kr[0].f_statistic.is_finite());
+    assert!(kr[0].den_df >= 1.0 && kr[0].den_df <= (sim.n_records - p) as f64);
 
     // Residual diagnostics from the sparse inverse subset equal the dense ones.
     let fixed: Vec<f64> = result.fixed_effects.iter().map(|e| e.estimate).collect();

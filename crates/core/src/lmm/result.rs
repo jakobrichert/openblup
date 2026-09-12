@@ -3,7 +3,8 @@ use serde::Serialize;
 
 use super::mme::MmeInverse;
 use crate::diagnostics::{
-    compute_diagnostics, wald_tests_satterthwaite, ResidualDiagnostics, WaldTest,
+    compute_diagnostics, wald_tests_kenward_roger, wald_tests_satterthwaite, KenwardRogerTerms,
+    ResidualDiagnostics, WaldTest,
 };
 use crate::model::MixedModel;
 
@@ -57,6 +58,10 @@ pub struct FitResult {
     /// Used for Satterthwaite degrees of freedom; empty when not available.
     #[serde(skip)]
     pub fixed_cov_derivatives: Vec<Vec<Vec<f64>>>,
+    /// Kenward-Roger `P_i` / `Q_ij` matrices at convergence (scaled-identity
+    /// models fitted by AI-REML); `None` otherwise.
+    #[serde(skip)]
+    pub kenward_roger_terms: Option<KenwardRogerTerms>,
     /// Number of levels of each random term (block sizes of the random part
     /// of the MME).
     pub n_random_per_term: Vec<usize>,
@@ -158,6 +163,22 @@ impl FitResult {
         }
         let ai = self.ai_matrix.as_ref()?;
         wald_tests_satterthwaite(self, ai)
+    }
+
+    /// Wald F-tests with the Kenward-Roger (1997) adjustment: bias-adjusted
+    /// covariance of the fixed effects, scaled F-statistic and matched
+    /// denominator degrees of freedom.
+    ///
+    /// Available for scaled-identity / relationship-matrix models fitted by
+    /// AI-REML with no parameter on the boundary; `None` otherwise (use
+    /// [`wald_tests_satterthwaite`](Self::wald_tests_satterthwaite) or the
+    /// containment tests).
+    pub fn wald_tests_kenward_roger(&self) -> Option<Vec<WaldTest>> {
+        if self.fixed_cov_derivatives.is_empty() || self.kenward_roger_terms.is_none() {
+            return None;
+        }
+        let ai = self.ai_matrix.as_ref()?;
+        wald_tests_kenward_roger(self, ai)
     }
 
     /// Residual diagnostics (conditional/marginal residuals, leverage,

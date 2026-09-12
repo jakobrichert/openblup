@@ -783,6 +783,7 @@ impl GeneralReml {
             n_variance_params: layout.total,
             c_inv: ev.sol.c_inv.clone(),
             fixed_cov_derivatives: self.fixed_cov_derivatives(model, ev, layout),
+            kenward_roger_terms: None,
             ai_matrix: None,
             n_random_per_term: model.z_blocks.iter().map(|z| z.cols()).collect(),
         })

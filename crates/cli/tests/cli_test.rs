@@ -428,6 +428,37 @@ fn fit_satterthwaite_cv_and_diagnostics() {
 }
 
 #[test]
+fn fit_kenward_roger_ddf() {
+    let out = openblup()
+        .args([
+            "fit",
+            "--data",
+            example("field_trial.csv").to_str().unwrap(),
+            "--response",
+            "yield",
+            "--fixed",
+            "mu + rep",
+            "--random",
+            "genotype",
+            "--ddf",
+            "kenward-roger",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stderr: {}", stderr);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["ddf_method"], "kenward-roger");
+    for t in json["wald_tests"].as_array().unwrap() {
+        let den = t["den_df"].as_f64().unwrap();
+        assert!((1.0..=14.0 + 1e-9).contains(&den), "{}", t);
+        assert!(t["f_statistic"].as_f64().unwrap() > 0.0, "{}", t);
+    }
+}
+
+#[test]
 fn fit_rejects_bad_term_specs() {
     let data = temp_file("trial.csv", TRIAL_CSV);
     for (term, needle) in [

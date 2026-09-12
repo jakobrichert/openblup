@@ -1,7 +1,8 @@
-use nalgebra::DMatrix;
+use nalgebra::{DMatrix, DVector};
 
 use crate::lmm::MmeInverse;
-use crate::matrix::sparse::spmv;
+use crate::matrix::sparse::{spmv, xt_y};
+use crate::matrix::sparse_cholesky::SparseCholeskySolver;
 use crate::types::SparseMat;
 
 use crate::lmm::FitResult;
@@ -18,6 +19,9 @@ pub enum DdfMethod {
     /// fixed effects and the inverse Average Information matrix.
     /// More accurate for unbalanced designs.
     Satterthwaite,
+    /// Kenward-Roger (1997): bias-adjusted covariance of the fixed effects
+    /// and a scaled F-statistic with matched denominator df.
+    KenwardRoger,
 }
 
 /// Satterthwaite denominator degrees of freedom for Wald tests of fixed
@@ -37,7 +41,10 @@ pub enum DdfMethod {
 /// so no dense `C⁻¹` is needed (see
 /// [`fixed_cov_derivatives_scaled_identity`]).
 ///
-/// Kenward-Roger's small-sample bias adjustment of `Φ` is not implemented.
+/// With the additional Kenward-Roger terms `P_i` and `Q_ij` (see
+/// [`KenwardRogerTerms`]) the calculator also provides the Kenward-Roger
+/// (1997) test: the bias-adjusted covariance `Φ_A` and the scaled
+/// F-statistic with its denominator df.
 pub struct DdfCalculator {
     /// `Φ = C⁻¹_{bb}` (p x p).
     phi: DMatrix<f64>,
@@ -243,6 +250,241 @@ impl DdfCalculator {
     pub fn containment_ddf(&self) -> f64 {
         (self.n_obs - self.n_fixed) as f64
     }
+
+    /// Kenward-Roger (1997) test of `L β = 0` for a contrast matrix `L`
+    /// (rows of length p) with the estimates `beta`.
+    ///
+    /// Returns the scaled statistic `λ / ℓ · (Lβ̂)' (L Φ_A L')⁻¹ (Lβ̂)` built
+    /// on the bias-adjusted covariance
+    ///
+    /// ```text
+    /// Φ_A = Φ + 2 Φ [ Σ_ij W_ij (Q_ij − P_i Φ P_j) ] Φ,   W = AI⁻¹,
+    /// ```
+    ///
+    /// with the denominator df `m` and scale `λ` from Kenward & Roger's
+    /// moment matching (their `A1`, `A2`, `B`, `g`, `c1..c3`, `E*`, `V*`,
+    /// `ρ`). For balanced designs this reproduces the ANOVA F-test and its
+    /// degrees of freedom.
+    ///
+    /// `None` if `L Φ L'` is singular.
+    pub fn kenward_roger(
+        &self,
+        kr: &KenwardRogerTerms,
+        contrast_matrix: &[Vec<f64>],
+        beta: &[f64],
+    ) -> Option<KenwardRogerTest> {
+        let p = self.n_fixed;
+        let ell = contrast_matrix.len();
+        let n_par = self.dphi.len();
+        if ell == 0 || kr.p.len() != n_par || kr.q.len() != n_par || beta.len() != p {
+            return None;
+        }
+        let phi = &self.phi;
+        let w = &self.ai_inv;
+
+        // Φ_A
+        let mut adj = DMatrix::zeros(p, p);
+        for i in 0..n_par {
+            for j in 0..n_par {
+                let pipj = &kr.p[i] * phi * &kr.p[j];
+                adj += (&kr.q[i][j] - pipj) * w[(i, j)];
+            }
+        }
+        let phi_a = phi + 2.0 * (phi * adj * phi);
+
+        // Θ = L' (L Φ L')⁻¹ L
+        let l = DMatrix::from_fn(ell, p, |r, c| contrast_matrix[r][c]);
+        let lpl = &l * phi * l.transpose();
+        let lpl_inv = lpl.try_inverse()?;
+        let theta = l.transpose() * &lpl_inv * &l;
+
+        // A1, A2
+        let m: Vec<DMatrix<f64>> = (0..n_par).map(|i| &theta * phi * &kr.p[i] * phi).collect();
+        let (mut a1, mut a2) = (0.0, 0.0);
+        for i in 0..n_par {
+            let tr_i = m[i].trace();
+            for j in 0..n_par {
+                a1 += w[(i, j)] * tr_i * m[j].trace();
+                a2 += w[(i, j)] * (&m[i] * &m[j]).trace();
+            }
+        }
+
+        let ell_f = ell as f64;
+        let max_df = (self.n_obs - self.n_fixed) as f64;
+        let (den_df, lambda) = if a2.abs() < 1e-12 {
+            // No variance-parameter uncertainty reaches the contrast: the
+            // Wald test is exact with the containment df and no scaling.
+            (max_df, 1.0)
+        } else {
+            let b = (a1 + 6.0 * a2) / (2.0 * ell_f);
+            let g = ((ell_f + 1.0) * a1 - (ell_f + 4.0) * a2) / ((ell_f + 2.0) * a2);
+            let denom = 3.0 * ell_f + 2.0 * (1.0 - g);
+            let c1 = g / denom;
+            let c2 = (ell_f - g) / denom;
+            let c3 = (ell_f + 2.0 - g) / denom;
+            let e_star = 1.0 / (1.0 - a2 / ell_f);
+            let v_star =
+                (2.0 / ell_f) * (1.0 + c1 * b) / ((1.0 - c2 * b) * (1.0 - c2 * b) * (1.0 - c3 * b));
+            let rho = v_star / (2.0 * e_star * e_star);
+            let m_df = 4.0 + (ell_f + 2.0) / (ell_f * rho - 1.0);
+            let lambda = m_df / (e_star * (m_df - 2.0));
+            if !m_df.is_finite() || !lambda.is_finite() || m_df <= 2.0 || lambda <= 0.0 {
+                (max_df, 1.0)
+            } else {
+                (m_df.max(1.0).min(max_df), lambda)
+            }
+        };
+
+        // Scaled F on Φ_A
+        let lb = &l * DVector::from_column_slice(beta);
+        let lpal = &l * &phi_a * l.transpose();
+        let lpal_inv = lpal.try_inverse()?;
+        let f_statistic = lambda / ell_f * (lb.transpose() * lpal_inv * &lb)[(0, 0)];
+        Some(KenwardRogerTest {
+            f_statistic: f_statistic.max(0.0),
+            num_df: ell,
+            den_df,
+            lambda,
+        })
+    }
+}
+
+/// Result of a Kenward-Roger test of one term.
+#[derive(Debug, Clone, Copy)]
+pub struct KenwardRogerTest {
+    /// Scaled F-statistic (`λ F`).
+    pub f_statistic: f64,
+    /// Numerator degrees of freedom (number of contrasts).
+    pub num_df: usize,
+    /// Denominator degrees of freedom `m`.
+    pub den_df: f64,
+    /// Scale factor `λ` applied to the Wald F.
+    pub lambda: f64,
+}
+
+/// The matrices Kenward & Roger (1997) need beyond `Φ` and `AI⁻¹`:
+///
+/// ```text
+/// P_i  = X' (∂V⁻¹/∂θ_i) X               = −(V⁻¹X)' (∂V/∂θ_i) (V⁻¹X)
+/// Q_ij = X' (∂V⁻¹/∂θ_i) V (∂V⁻¹/∂θ_j) X = (∂V/∂θ_i V⁻¹X)' V⁻¹ (∂V/∂θ_j V⁻¹X)
+/// ```
+///
+/// (p x p each, `V = ZGZ' + R`). They satisfy `∂Φ/∂θ_i = −Φ P_i Φ`.
+#[derive(Debug, Clone)]
+pub struct KenwardRogerTerms {
+    /// `P_i`, one per variance parameter.
+    pub p: Vec<DMatrix<f64>>,
+    /// `Q_ij`, indexed `[i][j]`.
+    pub q: Vec<Vec<DMatrix<f64>>>,
+}
+
+/// Kenward-Roger terms for a model with scaled variances `[σ²_1, ..., σ²_r,
+/// σ²_e]`, `u_k ~ N(0, σ²_k K_k)` and an IID residual, computed through the
+/// random-effects block of the MME, `C_zz = Z'Z/σ²_e + blockdiag(K_k⁻¹/σ²_k)`
+/// (sparse):
+///
+/// ```text
+/// V⁻¹ M          = (M − Z C_zz⁻¹ Z'M/σ²_e) / σ²_e
+/// ∂V/∂σ²_k V⁻¹X  = Z_k [C_zz⁻¹ Z'X/σ²_e]_k / σ²_k
+/// ∂V/∂σ²_e V⁻¹X  = V⁻¹X
+/// ```
+///
+/// so neither `K_k` nor a dense `V` is ever formed. `ginv_scaled[k]` is
+/// `K_k⁻¹/σ²_k` exactly as used to assemble the MME.
+pub fn kenward_roger_terms_scaled_identity(
+    x: &SparseMat,
+    z_blocks: &[SparseMat],
+    ginv_scaled: &[SparseMat],
+    variance_params: &[f64],
+) -> crate::error::Result<KenwardRogerTerms> {
+    let n = x.rows();
+    let p = x.cols();
+    let n_terms = z_blocks.len();
+    let sigma2_e = variance_params[n_terms];
+    let q_vec: Vec<usize> = z_blocks.iter().map(|z| z.cols()).collect();
+    let mut offsets = Vec::with_capacity(n_terms);
+    let mut off = 0;
+    for q in &q_vec {
+        offsets.push(off);
+        off += q;
+    }
+    let q_total = off;
+
+    // C_zz: the MME without fixed effects.
+    let empty_x: SparseMat = sprs::TriMat::new((n, 0)).to_csc();
+    let czz = crate::lmm::SparseMixedModelEquations::assemble(
+        &empty_x,
+        z_blocks,
+        &vec![0.0; n],
+        1.0 / sigma2_e,
+        ginv_scaled,
+    );
+    let solver = SparseCholeskySolver::new(&czz.coeff_matrix)?;
+
+    // V⁻¹ M for a dense n x p matrix; also returns S = C_zz⁻¹ Z'M/σ²_e.
+    let v_inv = |m: &DMatrix<f64>| -> crate::error::Result<(DMatrix<f64>, DMatrix<f64>)> {
+        let mut out = DMatrix::zeros(n, p);
+        let mut s_all = DMatrix::zeros(q_total, p);
+        for j in 0..p {
+            let col: Vec<f64> = (0..n).map(|i| m[(i, j)]).collect();
+            let mut rhs = vec![0.0; q_total];
+            for (k, z) in z_blocks.iter().enumerate() {
+                for (r, v) in xt_y(z, &col).iter().enumerate() {
+                    rhs[offsets[k] + r] = v / sigma2_e;
+                }
+            }
+            let s = solver.solve(&rhs)?;
+            let mut zs = vec![0.0; n];
+            for (k, z) in z_blocks.iter().enumerate() {
+                let sk = &s[offsets[k]..offsets[k] + q_vec[k]];
+                for (i, v) in spmv(z, sk).iter().enumerate() {
+                    zs[i] += v;
+                }
+            }
+            for i in 0..n {
+                out[(i, j)] = (col[i] - zs[i]) / sigma2_e;
+            }
+            for r in 0..q_total {
+                s_all[(r, j)] = s[r];
+            }
+        }
+        Ok((out, s_all))
+    };
+
+    let mut x_dense = DMatrix::zeros(n, p);
+    for (v, (i, j)) in x.iter() {
+        x_dense[(i, j)] = *v;
+    }
+    let (vx, s_x) = v_inv(&x_dense)?;
+
+    // T_i V⁻¹X for every parameter
+    let n_par = n_terms + 1;
+    let mut tvx: Vec<DMatrix<f64>> = Vec::with_capacity(n_par);
+    for (k, z) in z_blocks.iter().enumerate() {
+        let mut t = DMatrix::zeros(n, p);
+        for j in 0..p {
+            let sk: Vec<f64> = (0..q_vec[k]).map(|r| s_x[(offsets[k] + r, j)]).collect();
+            for (i, v) in spmv(z, &sk).iter().enumerate() {
+                t[(i, j)] = v / variance_params[k];
+            }
+        }
+        tvx.push(t);
+    }
+    tvx.push(vx.clone());
+
+    let u: Vec<DMatrix<f64>> = tvx
+        .iter()
+        .map(|t| v_inv(t).map(|(vt, _)| vt))
+        .collect::<crate::error::Result<_>>()?;
+
+    let p_mats: Vec<DMatrix<f64>> = tvx.iter().map(|t| -(vx.transpose() * t)).collect();
+    let q_mats: Vec<Vec<DMatrix<f64>>> = (0..n_par)
+        .map(|i| (0..n_par).map(|j| tvx[i].transpose() * &u[j]).collect())
+        .collect();
+    Ok(KenwardRogerTerms {
+        p: p_mats,
+        q: q_mats,
+    })
 }
 
 /// `∂Φ/∂θ` for a model whose variance parameters are the scaled variances
@@ -451,6 +693,64 @@ pub fn wald_tests_satterthwaite(
         }
     }
 
+    Some(tests)
+}
+
+/// Wald tests of the fixed-effect terms with the Kenward-Roger adjustment
+/// (bias-adjusted covariance, scaled F and matched denominator df).
+///
+/// Needs the derivatives of the fixed-effects covariance, the Kenward-Roger
+/// terms and the Average Information matrix stored in the [`FitResult`];
+/// `None` when any of them is unavailable.
+pub fn wald_tests_kenward_roger(
+    result: &FitResult,
+    ai_matrix: &DMatrix<f64>,
+) -> Option<Vec<WaldTest>> {
+    if result.fixed_effects.is_empty() {
+        return Some(Vec::new());
+    }
+    let kr = result.kenward_roger_terms.as_ref()?;
+    let n_fixed = result.n_fixed_params;
+    let phi = rows_to_matrix(&result.fixed_cov, n_fixed)?;
+    let dphi: Vec<DMatrix<f64>> = result
+        .fixed_cov_derivatives
+        .iter()
+        .map(|m| rows_to_matrix(m, n_fixed))
+        .collect::<Option<_>>()?;
+    let calc = DdfCalculator::new(phi, dphi, ai_matrix.clone(), result.n_obs)?;
+    let beta: Vec<f64> = result.fixed_effects.iter().map(|e| e.estimate).collect();
+
+    let mut term_order: Vec<String> = Vec::new();
+    let mut term_indices: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (i, ef) in result.fixed_effects.iter().enumerate() {
+        if !term_indices.contains_key(&ef.term) {
+            term_order.push(ef.term.clone());
+        }
+        term_indices.entry(ef.term.clone()).or_default().push(i);
+    }
+
+    let mut tests = Vec::new();
+    for term in &term_order {
+        let indices = &term_indices[term];
+        let contrast_matrix: Vec<Vec<f64>> = indices
+            .iter()
+            .map(|&idx| {
+                let mut row = vec![0.0; n_fixed];
+                row[idx] = 1.0;
+                row
+            })
+            .collect();
+        let test = calc.kenward_roger(kr, &contrast_matrix, &beta)?;
+        let p_value = f_distribution_sf(test.f_statistic, test.num_df as f64, test.den_df);
+        tests.push(WaldTest {
+            term: term.clone(),
+            f_statistic: test.f_statistic,
+            num_df: test.num_df,
+            den_df: test.den_df,
+            p_value,
+        });
+    }
     Some(tests)
 }
 
@@ -707,6 +1007,7 @@ mod tests {
             c_inv: Some(c_inv),
             ai_matrix: None,
             n_random_per_term: vec![q],
+            kenward_roger_terms: None,
             fixed_cov_derivatives: dphi.iter().map(|m| vec![vec![m[(0, 0)]]]).collect(),
         }
     }
@@ -749,5 +1050,119 @@ mod tests {
         let nu = calc.satterthwaite_ddf(&[1.0]);
         assert!(nu <= calc.containment_ddf());
         assert!(nu >= 1.0);
+    }
+
+    #[test]
+    fn kenward_roger_p_matches_covariance_derivatives() {
+        // ∂Φ/∂θ_i = −Φ P_i Φ for the one-way model (identity K).
+        let (q, n_per, s2u, s2e) = (6, 4, 1.7, 0.9);
+        let (x, z, _) = one_way_design(q, n_per);
+        let c_inv = one_way_inverse(q, n_per, s2u, s2e);
+        let dphi = fixed_cov_derivatives_scaled_identity(
+            &c_inv,
+            &x,
+            std::slice::from_ref(&z),
+            &[None],
+            &[s2u, s2e],
+        );
+        let ginv = sparse_diagonal(&vec![1.0 / s2u; q]);
+        let kr =
+            kenward_roger_terms_scaled_identity(&x, std::slice::from_ref(&z), &[ginv], &[s2u, s2e])
+                .unwrap();
+        let phi = c_inv.fixed_block(1);
+        for i in 0..2 {
+            let from_p = -(&phi * &kr.p[i] * &phi);
+            assert_relative_eq!(from_p[(0, 0)], dphi[i][(0, 0)], max_relative = 1e-9);
+        }
+        // Q_ii is a Gram matrix in the V⁻¹ inner product: non-negative.
+        for i in 0..2 {
+            assert!(kr.q[i][i][(0, 0)] >= 0.0);
+        }
+    }
+
+    #[test]
+    fn kenward_roger_reproduces_anova_for_balanced_rcbd() {
+        use crate::data::DataFrame;
+        use crate::model::MixedModelBuilder;
+        use crate::variance::Identity;
+
+        // t treatments (fixed) x b blocks (random), one plot per cell.
+        let (t, b) = (4usize, 5usize);
+        let tau = [0.0, 1.5, -1.0, 0.5];
+        let blk = [-3.0, -1.0, 0.0, 1.2, 2.8];
+        // Deterministic pseudo-random residuals.
+        let mut state: u64 = 12345;
+        let mut noise = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 2.0
+        };
+        let mut y = Vec::new();
+        let mut treat = Vec::new();
+        let mut block = Vec::new();
+        for bi in 0..b {
+            for ti in 0..t {
+                y.push(10.0 + tau[ti] + blk[bi] + noise());
+                treat.push(format!("T{ti}"));
+                block.push(format!("B{bi}"));
+            }
+        }
+        let mut df = DataFrame::new();
+        df.add_float_column("y", y.clone()).unwrap();
+        let treat_ref: Vec<&str> = treat.iter().map(|s| s.as_str()).collect();
+        let block_ref: Vec<&str> = block.iter().map(|s| s.as_str()).collect();
+        df.add_factor_column("treat", &treat_ref).unwrap();
+        df.add_factor_column("block", &block_ref).unwrap();
+        let mut model = MixedModelBuilder::new()
+            .data(&df)
+            .response("y")
+            .fixed("mu + treat")
+            .random("block", Identity::new(1.0), None)
+            .max_iterations(200)
+            .convergence(1e-12)
+            .build()
+            .unwrap();
+        let result = model.fit_reml().unwrap();
+        assert!(result.converged);
+        assert!(
+            !result.at_boundary.iter().any(|f| *f),
+            "{:?}",
+            result.at_boundary
+        );
+
+        // Two-way ANOVA F for treatments.
+        let n = (t * b) as f64;
+        let grand = y.iter().sum::<f64>() / n;
+        let mut ss_t = 0.0;
+        for ti in 0..t {
+            let m = (0..b).map(|bi| y[bi * t + ti]).sum::<f64>() / b as f64;
+            ss_t += b as f64 * (m - grand).powi(2);
+        }
+        let mut ss_b = 0.0;
+        for bi in 0..b {
+            let m = (0..t).map(|ti| y[bi * t + ti]).sum::<f64>() / t as f64;
+            ss_b += t as f64 * (m - grand).powi(2);
+        }
+        let ss_tot: f64 = y.iter().map(|v| (v - grand).powi(2)).sum();
+        let ss_e = ss_tot - ss_t - ss_b;
+        let df_e = ((t - 1) * (b - 1)) as f64;
+        let f_anova = (ss_t / (t - 1) as f64) / (ss_e / df_e);
+
+        let kr = result.wald_tests_kenward_roger().expect("KR available");
+        let test = kr.iter().find(|w| w.term == "treat").unwrap();
+        assert_eq!(test.num_df, t - 1);
+        assert_relative_eq!(test.den_df, df_e, epsilon = 1e-6);
+        assert_relative_eq!(test.f_statistic, f_anova, max_relative = 1e-6);
+        // The residual variance is the ANOVA error mean square.
+        assert_relative_eq!(
+            result.variance_component("residual").unwrap(),
+            ss_e / df_e,
+            max_relative = 1e-6
+        );
+        // Satterthwaite agrees on the balanced design as well.
+        let satt = result.wald_tests_satterthwaite().unwrap();
+        let st = satt.iter().find(|w| w.term == "treat").unwrap();
+        assert_relative_eq!(st.den_df, df_e, epsilon = 1e-4);
     }
 }
