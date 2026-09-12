@@ -6,7 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [lib]
-name = "openblup"
+name = "_internal"
 crate-type = ["cdylib"]
 
 [dependencies]
