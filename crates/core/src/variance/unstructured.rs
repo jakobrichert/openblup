@@ -10,10 +10,13 @@ use super::traits::VarStruct;
 ///
 /// Parameters: the k*(k+1)/2 elements of L stored column-major in the lower triangle.
 /// For a k x k covariance matrix:
-///   params = [L[0,0], L[1,0], L[2,0], ..., L[k-1,0],   // column 0
-///             L[1,1], L[2,1], ..., L[k-1,1],              // column 1
-///             ...
-///             L[k-1,k-1]]                                  // column k-1
+///
+/// ```text
+/// params = [L[0,0], L[1,0], L[2,0], ..., L[k-1,0],   // column 0
+///           L[1,1], L[2,1], ..., L[k-1,1],           // column 1
+///           ...
+///           L[k-1,k-1]]                              // column k-1
+/// ```
 ///
 /// This parameterization guarantees positive definiteness as long as diagonal
 /// elements of L are positive.

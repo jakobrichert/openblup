@@ -4,7 +4,7 @@ use sprs::TriMat;
 /// Compute the Kronecker product A (x) B of two sparse matrices.
 ///
 /// The Kronecker product of an (m x n) matrix A and a (p x q) matrix B
-/// is the (mp x nq) block matrix where each block (i,j) is A[i,j] * B.
+/// is the (mp x nq) block matrix where each block (i,j) is `A[i,j] * B`.
 ///
 /// This is the fundamental operation for separable spatial models:
 /// if rows have covariance Sigma_r and columns have covariance Sigma_c,

@@ -170,36 +170,19 @@ pub fn compute_a_inverse_with_inbreeding(ped: &Pedigree) -> Result<SparseMat> {
 ///
 /// The pedigree must be topologically sorted (parents before offspring).
 ///
-/// The algorithm computes F[i] for each animal in pedigree order. For animal
-/// *i* with sire *s* and dam *d*:
+/// For animal *i* with sire *s* and dam *d*, `F[i] = 0.5 * A[s, d]` when both
+/// parents are known and `0` otherwise, where `A` is the numerator
+/// relationship matrix. Rather than forming `A`, the algorithm traces the
+/// ancestor paths of each animal with the Cholesky-like factor `L` of `A`:
 ///
-/// - If both parents unknown: F[i] = 0
-/// - If one parent unknown: F[i] = 0
-/// - If both parents known: F[i] = 0.5 * a(s, d)
+/// ```text
+/// L[i, i] = sqrt(d_i)                              (Mendelian sampling variance)
+/// L[i, j] = 0.5 * (L[s, j] + L[d, j])   for j < i
+/// F[i]    = sum_j L[i, j]^2 - 1 = A[i, i] - 1
+/// ```
 ///
-/// where a(s, d) is the additive relationship between sire and dam, which
-/// equals the inbreeding coefficient of their offspring plus some terms.
-///
-/// This implementation uses the tabular method to track the relationship
-/// coefficients needed. Specifically, for each animal *i* we compute a row
-/// of the L matrix (Cholesky-like decomposition of A) using:
-///
-///   L[i, j] = 0                                   if j > i
-///   L[i, i] = sqrt(d_i)
-///   L[i, j] = 0.5 * (L[s, j] + L[d, j])          for j < i
-///
-/// Then F[i] = sum_j L[i, j]^2 - 1 = A[i, i] - 1.
-///
-/// However, the full L matrix is O(n^2) in memory. We use a more memory-
-/// efficient approach: for each animal, compute only the diagonal of A.
-///
-/// Simpler approach using the recursive relationship:
-///   A[i, i] = 1 + F[i]
-///   F[i] = 0.5 * A[sire, dam]
-///   A[i, j] for j < i: A[i, j] = 0.5 * (A[s, j] + A[d, j])
-///
-/// For efficiency, we use the Meuwissen & Luo (1992) algorithm which only
-/// requires O(n) memory by tracing ancestor paths.
+/// Only O(n) working memory is needed because each animal's row of `L` is
+/// accumulated over its ancestors and discarded.
 ///
 /// # Returns
 ///
@@ -702,11 +685,31 @@ mod tests {
         let triples = vec![
             ("1".to_string(), None, None),
             ("2".to_string(), None, None),
-            ("3".to_string(), Some("1".to_string()), Some("2".to_string())),
-            ("4".to_string(), Some("1".to_string()), Some("2".to_string())),
-            ("5".to_string(), Some("3".to_string()), Some("4".to_string())),
-            ("6".to_string(), Some("3".to_string()), Some("4".to_string())),
-            ("7".to_string(), Some("5".to_string()), Some("6".to_string())),
+            (
+                "3".to_string(),
+                Some("1".to_string()),
+                Some("2".to_string()),
+            ),
+            (
+                "4".to_string(),
+                Some("1".to_string()),
+                Some("2".to_string()),
+            ),
+            (
+                "5".to_string(),
+                Some("3".to_string()),
+                Some("4".to_string()),
+            ),
+            (
+                "6".to_string(),
+                Some("3".to_string()),
+                Some("4".to_string()),
+            ),
+            (
+                "7".to_string(),
+                Some("5".to_string()),
+                Some("6".to_string()),
+            ),
         ];
         let mut ped = Pedigree::from_triples(&triples).unwrap();
         ped.sort_pedigree().unwrap();

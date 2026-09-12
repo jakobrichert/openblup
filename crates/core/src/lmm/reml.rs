@@ -3,9 +3,7 @@ use crate::matrix::sparse::spmv;
 use crate::model::MixedModel;
 
 use super::mme::MixedModelEquations;
-use super::result::{
-    FitResult, NamedEffect, RandomEffectBlock, RemlIteration, VarianceEstimate,
-};
+use super::result::{FitResult, NamedEffect, RandomEffectBlock, RemlIteration, VarianceEstimate};
 
 /// REML engine using EM algorithm for variance component estimation.
 ///
@@ -93,9 +91,10 @@ impl EmReml {
 
             let sol = mme.solve()?;
 
-            let c_inv = sol.c_inv.as_ref().ok_or(LmmError::CholeskyFailed(
-                "C^{-1} not available".into(),
-            ))?;
+            let c_inv = sol
+                .c_inv
+                .as_ref()
+                .ok_or(LmmError::CholeskyFailed("C^{-1} not available".into()))?;
 
             // Save old params for convergence check
             let old_sigma2_random = sigma2_random.clone();
@@ -137,7 +136,10 @@ impl EmReml {
                 let u_quadratic = if let Some(ref ginv_k) = model.ginv_matrices[k] {
                     // ginv_k = K^{-1}, so u'K^{-1}u
                     let kinv_u = spmv(ginv_k, u_k);
-                    u_k.iter().zip(kinv_u.iter()).map(|(a, b)| a * b).sum::<f64>()
+                    u_k.iter()
+                        .zip(kinv_u.iter())
+                        .map(|(a, b)| a * b)
+                        .sum::<f64>()
                 } else {
                     // K = I, so u'u
                     u_k.iter().map(|u| u * u).sum::<f64>()
@@ -187,8 +189,7 @@ impl EmReml {
                 log_det_g += q as f64 * old_sigma2_random[k].ln();
             }
             let log_2_pi = (2.0 * std::f64::consts::PI).ln();
-            let logl =
-                -0.5 * (n_eff * log_2_pi + log_det_r + log_det_g + sol.log_det_c + y_p_y);
+            let logl = -0.5 * (n_eff * log_2_pi + log_det_r + log_det_g + sol.log_det_c + y_p_y);
 
             // Convergence criterion: relative change in parameters
             let mut all_params_old = old_sigma2_random.clone();
@@ -308,6 +309,9 @@ impl EmReml {
 
         // Fixed effects with SEs from C^{-1}
         let c_inv = sol.c_inv.as_ref().unwrap();
+        let fixed_cov: Vec<Vec<f64>> = (0..n_fixed)
+            .map(|i| (0..n_fixed).map(|j| c_inv[(i, j)]).collect())
+            .collect();
         let fixed_effects: Vec<NamedEffect> = model
             .fixed_labels
             .iter()
@@ -370,6 +374,8 @@ impl EmReml {
             history: history.to_vec(),
             variance_se: vec![0.0; var_params.len()],
             residuals,
+            fixed_cov,
+            at_boundary: vec![false; var_params.len()],
             n_obs: n,
             n_fixed_params: n_fixed,
             n_variance_params: var_params.len(),

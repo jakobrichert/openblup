@@ -31,7 +31,9 @@ use faer::Side;
 ///
 /// The sprs matrix must be in CSC (Compressed Sparse Column) format. Only the
 /// upper triangle is extracted for the symmetric SPD systems we solve.
-fn sprs_to_faer_upper(matrix: &SparseMat) -> std::result::Result<SparseColMat<usize, f64>, LmmError> {
+fn sprs_to_faer_upper(
+    matrix: &SparseMat,
+) -> std::result::Result<SparseColMat<usize, f64>, LmmError> {
     let n = matrix.rows();
     assert_eq!(n, matrix.cols(), "Matrix must be square");
 
@@ -52,14 +54,12 @@ fn sprs_to_faer_upper(matrix: &SparseMat) -> std::result::Result<SparseColMat<us
 
     match SparseColMat::<usize, f64>::try_new_from_triplets(n, n, &triplets) {
         Ok(mat) => Ok(mat),
-        Err(CreationError::Generic(e)) => {
-            Err(LmmError::CholeskyFailed(format!("Failed to create faer sparse matrix: {e}")))
-        }
-        Err(CreationError::OutOfBounds { row, col }) => {
-            Err(LmmError::CholeskyFailed(format!(
-                "Index out of bounds: row={row}, col={col}"
-            )))
-        }
+        Err(CreationError::Generic(e)) => Err(LmmError::CholeskyFailed(format!(
+            "Failed to create faer sparse matrix: {e}"
+        ))),
+        Err(CreationError::OutOfBounds { row, col }) => Err(LmmError::CholeskyFailed(format!(
+            "Index out of bounds: row={row}, col={col}"
+        ))),
     }
 }
 
@@ -430,7 +430,11 @@ mod tests {
     fn test_create_solver() {
         let mat = build_test_matrix();
         let solver = SparseCholeskySolver::new(&mat);
-        assert!(solver.is_ok(), "Failed to create solver: {:?}", solver.err());
+        assert!(
+            solver.is_ok(),
+            "Failed to create solver: {:?}",
+            solver.err()
+        );
         assert_eq!(solver.unwrap().dim(), 3);
     }
 
@@ -474,10 +478,7 @@ mod tests {
 
         let tol = 1e-10;
         for (i, &s) in sol.iter().enumerate() {
-            assert!(
-                (s - 1.0).abs() < tol,
-                "sol[{i}] = {s}, expected 1.0"
-            );
+            assert!((s - 1.0).abs() < tol, "sol[{i}] = {s}, expected 1.0");
         }
     }
 

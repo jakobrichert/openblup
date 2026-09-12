@@ -1,7 +1,7 @@
-use sprs::{CsMat, TriMat};
+use sprs::CsMat;
 
 use crate::error::Result;
-use crate::matrix::sparse::{spmv, xt_y};
+use crate::matrix::sparse::xt_y;
 
 /// Henderson's Mixed Model Equations.
 ///
@@ -208,11 +208,7 @@ fn compute_xtx_scaled(x: &CsMat<f64>, scale: f64, _n: usize) -> nalgebra::DMatri
     let mut result = nalgebra::DMatrix::zeros(p, p);
 
     // Ensure CSC format
-    let x_csc = if x.is_csc() {
-        x.clone()
-    } else {
-        x.to_csc()
-    };
+    let x_csc = if x.is_csc() { x.clone() } else { x.to_csc() };
 
     // Compute X'X using outer views
     for j in 0..p {
@@ -394,8 +390,8 @@ fn compute_xtz_scaled(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::matrix::sparse::sparse_diagonal;
     use approx::assert_relative_eq;
-    use crate::matrix::sparse::{sparse_identity, sparse_diagonal};
 
     #[test]
     fn test_mme_simple_intercept_only() {
@@ -445,15 +441,9 @@ mod tests {
         let sigma_u2 = 4.0;
 
         // G^{-1} = (1/sigma_u^2) * I
-        let ginv = sparse_diagonal(&vec![1.0 / sigma_u2; 2]);
+        let ginv = sparse_diagonal(&[1.0 / sigma_u2; 2]);
 
-        let mme = MixedModelEquations::assemble(
-            &x,
-            &[z],
-            &y,
-            1.0 / sigma_e2,
-            &[ginv],
-        );
+        let mme = MixedModelEquations::assemble(&x, &[z], &y, 1.0 / sigma_e2, &[ginv]);
 
         assert_eq!(mme.dim, 3); // 1 fixed + 2 random
         assert_eq!(mme.n_fixed, 1);
@@ -466,7 +456,7 @@ mod tests {
         assert!(sol.fixed_effects[0] > 8.0 && sol.fixed_effects[0] < 10.0);
         assert!(sol.random_effects[0][0] > 0.0); // u1 positive
         assert!(sol.random_effects[0][1] < 0.0); // u2 negative
-        // BLUP shrinkage: |u1| + |u2| should be less than 2 (the true difference is 2)
+                                                 // BLUP shrinkage: |u1| + |u2| should be less than 2 (the true difference is 2)
         assert!(sol.random_effects[0][0].abs() < 2.0);
     }
 
@@ -487,7 +477,7 @@ mod tests {
         let z = z_tri.to_csc();
 
         let y = vec![1.0, 2.0, 3.0, 4.0];
-        let ginv = sparse_diagonal(&vec![0.5; 3]);
+        let ginv = sparse_diagonal(&[0.5; 3]);
 
         let mme = MixedModelEquations::assemble(&x, &[z], &y, 1.0, &[ginv]);
 

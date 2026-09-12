@@ -100,9 +100,7 @@ impl DdfCalculator {
 
     /// Extract the fixed-effects block of C^{-1}, i.e. `Phi = C^{-1}_{bb}` (p x p).
     fn phi(&self) -> DMatrix<f64> {
-        self.c_inv
-            .view((0, 0), (self.n_fixed, self.n_fixed))
-            .into()
+        self.c_inv.view((0, 0), (self.n_fixed, self.n_fixed)).into()
     }
 
     /// Compute the derivative `dC/dtheta_k` for variance parameter k.
@@ -135,8 +133,7 @@ impl DdfCalculator {
             // dC/d(sigma2_k) = -1/sigma2_k^2 * I in the (k,k) random block
             let sigma2_k = self.variance_params[k];
             let mut dc = DMatrix::zeros(dim, dim);
-            let block_start =
-                self.n_fixed + self.n_random_per_term[..k].iter().sum::<usize>();
+            let block_start = self.n_fixed + self.n_random_per_term[..k].iter().sum::<usize>();
             let q_k = self.n_random_per_term[k];
             let scale = -1.0 / (sigma2_k * sigma2_k);
             for i in 0..q_k {
@@ -319,8 +316,7 @@ impl DdfCalculator {
                 let mut val = 0.0;
                 for r in 0..p {
                     for s in 0..p {
-                        val +=
-                            contrast_matrix[i][r] * phi[(r, s)] * contrast_matrix[j][s];
+                        val += contrast_matrix[i][r] * phi[(r, s)] * contrast_matrix[j][s];
                     }
                 }
                 l_phi_lt[(i, j)] = val;
@@ -458,10 +454,7 @@ pub fn wald_tests_satterthwaite(
         if !term_indices.contains_key(&ef.term) {
             term_order.push(ef.term.clone());
         }
-        term_indices
-            .entry(ef.term.clone())
-            .or_default()
-            .push(i);
+        term_indices.entry(ef.term.clone()).or_default().push(i);
     }
 
     let mut tests = Vec::new();
@@ -519,22 +512,21 @@ pub fn wald_tests_satterthwaite(
 
             let den_df = calc.satterthwaite_ddf_multi(&contrast_matrix);
 
-            // Compute the F-statistic (same approximation as wald_tests
-            // when we only have diagonal SEs)
-            let f_stat: f64 = indices
+            // General Wald F using the covariance block of C^{-1}.
+            let beta: Vec<f64> = indices
                 .iter()
-                .map(|&idx| {
-                    let ef = &result.fixed_effects[idx];
-                    if ef.se > 0.0 {
-                        (ef.estimate / ef.se).powi(2)
-                    } else {
-                        0.0
-                    }
-                })
-                .sum::<f64>()
-                / num_df as f64;
+                .map(|&idx| result.fixed_effects[idx].estimate)
+                .collect();
+            let k = indices.len();
+            let cov = DMatrix::from_fn(k, k, |a, b| c_inv[(indices[a], indices[b])]);
+            let (f_stat, rank) = super::wald::wald_f_general(&beta, &cov);
+            let num_df = rank.max(1);
 
-            let p_value = f_distribution_sf(f_stat, num_df as f64, den_df);
+            let p_value = if rank == 0 {
+                1.0
+            } else {
+                f_distribution_sf(f_stat, num_df as f64, den_df)
+            };
 
             tests.push(WaldTest {
                 term: term.clone(),
@@ -556,12 +548,7 @@ mod tests {
 
     /// Helper to build a simple C^{-1} matrix for testing.
     /// Constructs a balanced one-way random intercept model MME and inverts it.
-    fn make_simple_c_inv(
-        p: usize,
-        q: usize,
-        sigma2_e: f64,
-        sigma2_u: f64,
-    ) -> DMatrix<f64> {
+    fn make_simple_c_inv(p: usize, q: usize, sigma2_e: f64, sigma2_u: f64) -> DMatrix<f64> {
         let dim = p + q;
         let mut c = DMatrix::zeros(dim, dim);
 
@@ -590,12 +577,7 @@ mod tests {
     }
 
     /// Helper to build an AI matrix for testing.
-    fn make_simple_ai(
-        sigma2_u: f64,
-        sigma2_e: f64,
-        q: usize,
-        n: usize,
-    ) -> DMatrix<f64> {
+    fn make_simple_ai(sigma2_u: f64, sigma2_e: f64, q: usize, n: usize) -> DMatrix<f64> {
         let mut ai = DMatrix::zeros(2, 2);
         ai[(0, 0)] = (q as f64) / (2.0 * sigma2_u * sigma2_u);
         ai[(1, 1)] = (n as f64) / (2.0 * sigma2_e * sigma2_e);
@@ -613,8 +595,7 @@ mod tests {
         let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
         let ai = make_simple_ai(sigma2_u, sigma2_e, q, 50);
 
-        let calc =
-            DdfCalculator::new(c_inv, ai, p, 50, vec![q], vec![sigma2_u, sigma2_e]);
+        let calc = DdfCalculator::new(c_inv, ai, p, 50, vec![q], vec![sigma2_u, sigma2_e]);
         assert!(
             calc.is_some(),
             "DdfCalculator should be created successfully"
@@ -631,12 +612,8 @@ mod tests {
 
         let ai = DMatrix::zeros(2, 2);
 
-        let calc =
-            DdfCalculator::new(c_inv, ai, p, 50, vec![q], vec![sigma2_u, sigma2_e]);
-        assert!(
-            calc.is_none(),
-            "DdfCalculator should fail with singular AI"
-        );
+        let calc = DdfCalculator::new(c_inv, ai, p, 50, vec![q], vec![sigma2_u, sigma2_e]);
+        assert!(calc.is_none(), "DdfCalculator should fail with singular AI");
     }
 
     #[test]
@@ -649,20 +626,14 @@ mod tests {
         let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
         let ai = make_simple_ai(sigma2_u, sigma2_e, q, n_obs);
 
-        let calc = DdfCalculator::new(
-            c_inv, ai, p, n_obs, vec![q], vec![sigma2_u, sigma2_e],
-        )
-        .unwrap();
+        let calc =
+            DdfCalculator::new(c_inv, ai, p, n_obs, vec![q], vec![sigma2_u, sigma2_e]).unwrap();
 
         let contrast = vec![1.0];
         let nu = calc.satterthwaite_ddf(&contrast);
 
         let containment_df = (n_obs - p) as f64;
-        assert!(
-            nu > 0.0,
-            "Satterthwaite ddf should be positive, got {}",
-            nu
-        );
+        assert!(nu > 0.0, "Satterthwaite ddf should be positive, got {}", nu);
         assert!(
             nu <= containment_df + 1e-10,
             "Satterthwaite ddf ({}) should be <= containment df ({})",
@@ -681,10 +652,8 @@ mod tests {
         let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
         let ai = make_simple_ai(sigma2_u, sigma2_e, q, n_obs);
 
-        let calc = DdfCalculator::new(
-            c_inv, ai, p, n_obs, vec![q], vec![sigma2_u, sigma2_e],
-        )
-        .unwrap();
+        let calc =
+            DdfCalculator::new(c_inv, ai, p, n_obs, vec![q], vec![sigma2_u, sigma2_e]).unwrap();
 
         let contrast = vec![1.0];
         let nu = calc.satterthwaite_ddf(&contrast);
@@ -708,10 +677,8 @@ mod tests {
         let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
         let ai = make_simple_ai(sigma2_u, sigma2_e, q, n_obs);
 
-        let calc = DdfCalculator::new(
-            c_inv, ai, p, n_obs, vec![q], vec![sigma2_u, sigma2_e],
-        )
-        .unwrap();
+        let calc =
+            DdfCalculator::new(c_inv, ai, p, n_obs, vec![q], vec![sigma2_u, sigma2_e]).unwrap();
 
         assert!(
             (calc.containment_ddf() - 47.0).abs() < 1e-10,
@@ -730,10 +697,8 @@ mod tests {
         let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
         let ai = make_simple_ai(sigma2_u, sigma2_e, q, n_obs);
 
-        let calc = DdfCalculator::new(
-            c_inv, ai, p, n_obs, vec![q], vec![sigma2_u, sigma2_e],
-        )
-        .unwrap();
+        let calc =
+            DdfCalculator::new(c_inv, ai, p, n_obs, vec![q], vec![sigma2_u, sigma2_e]).unwrap();
 
         let contrast_matrix = vec![vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0]];
 
@@ -783,6 +748,8 @@ mod tests {
             history: vec![],
             variance_se: vec![0.5, 0.3],
             residuals: vec![],
+            fixed_cov: vec![],
+            at_boundary: vec![],
             n_obs,
             n_fixed_params: p,
             n_variance_params: 2,
@@ -822,6 +789,8 @@ mod tests {
             history: vec![],
             variance_se: vec![],
             residuals: vec![],
+            fixed_cov: vec![],
+            at_boundary: vec![],
             n_obs: 10,
             n_fixed_params: 0,
             n_variance_params: 0,
@@ -847,10 +816,8 @@ mod tests {
         let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
         let ai = make_simple_ai(sigma2_u, sigma2_e, q, n_obs);
 
-        let calc = DdfCalculator::new(
-            c_inv, ai, p, n_obs, vec![q], vec![sigma2_u, sigma2_e],
-        )
-        .unwrap();
+        let calc =
+            DdfCalculator::new(c_inv, ai, p, n_obs, vec![q], vec![sigma2_u, sigma2_e]).unwrap();
 
         let contrast = vec![1.0];
         let satt_df = calc.satterthwaite_ddf(&contrast);
@@ -879,15 +846,8 @@ mod tests {
         let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
 
         let ai = make_simple_ai(sigma2_u, sigma2_e, q, 30);
-        let calc = DdfCalculator::new(
-            c_inv.clone(),
-            ai,
-            p,
-            30,
-            vec![q],
-            vec![sigma2_u, sigma2_e],
-        )
-        .unwrap();
+        let calc = DdfCalculator::new(c_inv.clone(), ai, p, 30, vec![q], vec![sigma2_u, sigma2_e])
+            .unwrap();
 
         let phi = calc.phi();
         assert_eq!(phi.nrows(), p);
@@ -898,7 +858,12 @@ mod tests {
                 assert!(
                     (phi[(i, j)] - c_inv[(i, j)]).abs() < 1e-12,
                     "Phi[{},{}] = {} but C^{{-1}}[{},{}] = {}",
-                    i, j, phi[(i, j)], i, j, c_inv[(i, j)]
+                    i,
+                    j,
+                    phi[(i, j)],
+                    i,
+                    j,
+                    c_inv[(i, j)]
                 );
             }
         }
@@ -913,10 +878,7 @@ mod tests {
         let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
         let ai = make_simple_ai(sigma2_u, sigma2_e, q, 30);
 
-        let calc = DdfCalculator::new(
-            c_inv, ai, p, 30, vec![q], vec![sigma2_u, sigma2_e],
-        )
-        .unwrap();
+        let calc = DdfCalculator::new(c_inv, ai, p, 30, vec![q], vec![sigma2_u, sigma2_e]).unwrap();
 
         let dc = calc.dc_dtheta(0);
         let dim = p + q;
@@ -927,7 +889,9 @@ mod tests {
                 assert!(
                     dc[(i, j)].abs() < 1e-14,
                     "dC/dtheta[{},{}] should be 0 (fixed row), got {}",
-                    i, j, dc[(i, j)]
+                    i,
+                    j,
+                    dc[(i, j)]
                 );
             }
         }
@@ -938,7 +902,9 @@ mod tests {
             assert!(
                 (dc[(p + i, p + i)] - expected).abs() < 1e-14,
                 "dC/dtheta diagonal[{}] should be {}, got {}",
-                i, expected, dc[(p + i, p + i)]
+                i,
+                expected,
+                dc[(p + i, p + i)]
             );
         }
     }
@@ -1004,6 +970,8 @@ mod tests {
             history: vec![],
             variance_se: vec![0.8, 0.4],
             residuals: vec![],
+            fixed_cov: vec![],
+            at_boundary: vec![],
             n_obs,
             n_fixed_params: p,
             n_variance_params: 2,
@@ -1038,10 +1006,7 @@ mod tests {
         let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
         let ai = make_simple_ai(sigma2_u, sigma2_e, q, 30);
 
-        let calc = DdfCalculator::new(
-            c_inv, ai, p, 30, vec![q], vec![sigma2_u, sigma2_e],
-        )
-        .unwrap();
+        let calc = DdfCalculator::new(c_inv, ai, p, 30, vec![q], vec![sigma2_u, sigma2_e]).unwrap();
 
         // Check symmetry for derivative w.r.t. random component
         let dphi_0 = calc.dphi_dtheta(0);
@@ -1050,7 +1015,12 @@ mod tests {
                 assert!(
                     (dphi_0[(i, j)] - dphi_0[(j, i)]).abs() < 1e-12,
                     "dPhi/dtheta_0 should be symmetric: [{},{}]={} vs [{},{}]={}",
-                    i, j, dphi_0[(i, j)], j, i, dphi_0[(j, i)]
+                    i,
+                    j,
+                    dphi_0[(i, j)],
+                    j,
+                    i,
+                    dphi_0[(j, i)]
                 );
             }
         }
@@ -1062,7 +1032,12 @@ mod tests {
                 assert!(
                     (dphi_1[(i, j)] - dphi_1[(j, i)]).abs() < 1e-12,
                     "dPhi/dtheta_1 should be symmetric: [{},{}]={} vs [{},{}]={}",
-                    i, j, dphi_1[(i, j)], j, i, dphi_1[(j, i)]
+                    i,
+                    j,
+                    dphi_1[(i, j)],
+                    j,
+                    i,
+                    dphi_1[(j, i)]
                 );
             }
         }
@@ -1077,10 +1052,7 @@ mod tests {
         let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
         let ai = make_simple_ai(sigma2_u, sigma2_e, q, 30);
 
-        let calc = DdfCalculator::new(
-            c_inv, ai, p, 30, vec![q], vec![sigma2_u, sigma2_e],
-        )
-        .unwrap();
+        let calc = DdfCalculator::new(c_inv, ai, p, 30, vec![q], vec![sigma2_u, sigma2_e]).unwrap();
 
         let dc = calc.dc_dtheta(1);
         let dim = p + q;
@@ -1098,7 +1070,8 @@ mod tests {
                 assert!(
                     (dc[(i, j)] - dc[(j, i)]).abs() < 1e-10,
                     "dC/d(sigma2_e) should be symmetric at [{},{}]",
-                    i, j
+                    i,
+                    j
                 );
             }
         }

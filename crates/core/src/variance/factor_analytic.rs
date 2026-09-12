@@ -28,18 +28,31 @@ pub struct FactorAnalytic {
 impl FactorAnalytic {
     /// Create a new FA(k) structure for `n_env` environments with `n_factors` factors.
     pub fn new(n_env: usize, n_factors: usize) -> Self {
-        assert!(n_factors > 0 && n_factors <= n_env, "n_factors must be in [1, n_env]");
+        assert!(
+            n_factors > 0 && n_factors <= n_env,
+            "n_factors must be in [1, n_env]"
+        );
         // Default: small loadings, unit specific variances
         let loadings = vec![0.1; n_env * n_factors];
         let psi = vec![1.0; n_env];
-        Self { n_env, n_factors, loadings, psi }
+        Self {
+            n_env,
+            n_factors,
+            loadings,
+            psi,
+        }
     }
 
     /// Create from explicit loadings and specific variances.
     pub fn from_params(n_env: usize, n_factors: usize, loadings: Vec<f64>, psi: Vec<f64>) -> Self {
         assert_eq!(loadings.len(), n_env * n_factors);
         assert_eq!(psi.len(), n_env);
-        Self { n_env, n_factors, loadings, psi }
+        Self {
+            n_env,
+            n_factors,
+            loadings,
+            psi,
+        }
     }
 
     /// Get loading λ_{i,j} (environment i, factor j).
@@ -186,7 +199,10 @@ impl VarStruct for FactorAnalytic {
         if params.len() != expected {
             return Err(LmmError::InvalidParameter(format!(
                 "FA({}) with {} envs expects {} parameters, got {}",
-                self.n_factors, self.n_env, expected, params.len()
+                self.n_factors,
+                self.n_env,
+                expected,
+                params.len()
             )));
         }
         let n_load = self.n_env * self.n_factors;
@@ -196,7 +212,8 @@ impl VarStruct for FactorAnalytic {
         for (i, &v) in self.psi.iter().enumerate() {
             if v <= 0.0 {
                 return Err(LmmError::InvalidParameter(format!(
-                    "Specific variance ψ_{} must be positive, got {}", i, v
+                    "Specific variance ψ_{} must be positive, got {}",
+                    i, v
                 )));
             }
         }
@@ -271,12 +288,14 @@ impl VarStruct for FactorAnalytic {
             params_minus[p_idx] -= eps;
 
             let fa_plus = FactorAnalytic::from_params(
-                self.n_env, self.n_factors,
+                self.n_env,
+                self.n_factors,
                 params_plus[..self.n_env * self.n_factors].to_vec(),
                 params_plus[self.n_env * self.n_factors..].to_vec(),
             );
             let fa_minus = FactorAnalytic::from_params(
-                self.n_env, self.n_factors,
+                self.n_env,
+                self.n_factors,
                 params_minus[..self.n_env * self.n_factors].to_vec(),
                 params_minus[self.n_env * self.n_factors..].to_vec(),
             );
@@ -434,7 +453,8 @@ mod tests {
     #[test]
     fn test_fa2_inverse() {
         let fa = FactorAnalytic::from_params(
-            4, 2,
+            4,
+            2,
             vec![1.0, 0.5, 0.3, 0.8, 0.2, 0.7, 0.4, 0.1],
             vec![1.0, 1.0, 1.0, 1.0],
         );
@@ -487,7 +507,7 @@ mod tests {
         let fa = fa2(3);
         let bounds = fa.bounds();
         assert_eq!(bounds.len(), 9); // 6 loadings + 3 psi
-        // First 6 are loadings: unconstrained
+                                     // First 6 are loadings: unconstrained
         assert!(bounds[0].0.is_infinite() && bounds[0].0 < 0.0);
         // Last 3 are psi: positive
         assert!(bounds[6].0 > 0.0);
@@ -509,7 +529,8 @@ mod tests {
     #[test]
     fn test_fa_symmetry() {
         let fa = FactorAnalytic::from_params(
-            4, 2,
+            4,
+            2,
             vec![1.0, 0.5, 0.3, 0.8, 0.2, 0.7, 0.4, 0.1],
             vec![1.0, 1.0, 1.0, 1.0],
         );
@@ -518,10 +539,14 @@ mod tests {
         for i in 0..4 {
             for j in 0..4 {
                 assert_relative_eq!(
-                    get_entry(&cov, i, j), get_entry(&cov, j, i), epsilon = 1e-10
+                    get_entry(&cov, i, j),
+                    get_entry(&cov, j, i),
+                    epsilon = 1e-10
                 );
                 assert_relative_eq!(
-                    get_entry(&inv, i, j), get_entry(&inv, j, i), epsilon = 1e-10
+                    get_entry(&inv, i, j),
+                    get_entry(&inv, j, i),
+                    epsilon = 1e-10
                 );
             }
         }

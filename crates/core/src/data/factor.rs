@@ -70,6 +70,35 @@ impl FactorColumn {
             .map(|(name, _)| name.as_str())
     }
 
+    /// Returns the level names ordered by their integer code.
+    pub fn level_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = vec![""; self.levels.len()];
+        for (name, &code) in &self.levels {
+            names[code] = name.as_str();
+        }
+        names
+    }
+
+    /// Return a new column containing only the rows where `keep[i]` is true.
+    ///
+    /// Levels are re-discovered from the retained rows, so unused levels are
+    /// dropped and codes are renumbered.
+    ///
+    /// # Panics
+    /// Panics if `keep` does not have one entry per observation.
+    pub fn subset(&self, keep: &[bool]) -> FactorColumn {
+        assert_eq!(keep.len(), self.codes.len(), "row mask length mismatch");
+        let names = self.level_names();
+        let retained: Vec<&str> = self
+            .codes
+            .iter()
+            .zip(keep)
+            .filter(|(_, &k)| k)
+            .map(|(&code, _)| names[code])
+            .collect();
+        FactorColumn::new(&retained)
+    }
+
     /// Returns the number of observations (rows).
     pub fn len(&self) -> usize {
         self.codes.len()
@@ -132,6 +161,18 @@ mod tests {
         assert_eq!(col.levels()["red"], 0);
         assert_eq!(col.levels()["green"], 1);
         assert_eq!(col.levels()["blue"], 2);
+    }
+
+    #[test]
+    fn test_level_names_and_subset() {
+        let col = FactorColumn::new(&["C", "A", "B", "A", "C"]);
+        assert_eq!(col.level_names(), vec!["C", "A", "B"]);
+
+        let sub = col.subset(&[true, false, true, false, true]);
+        assert_eq!(sub.len(), 3);
+        assert_eq!(sub.n_levels(), 2);
+        assert_eq!(sub.level_names(), vec!["C", "B"]);
+        assert_eq!(sub.codes(), &[0, 1, 0]);
     }
 
     #[test]

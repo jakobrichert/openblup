@@ -169,10 +169,7 @@ pub fn diagnostics_summary(diag: &ResidualDiagnostics) -> String {
         .filter(|(_, &d)| d > cook_threshold)
         .map(|(i, _)| i)
         .collect();
-    s.push_str(&format!(
-        "Cook's distance:\n  Max: {:.4}\n",
-        max_d
-    ));
+    s.push_str(&format!("Cook's distance:\n  Max: {:.4}\n", max_d));
     if !influential.is_empty() {
         s.push_str(&format!(
             "  Influential (>{:.4}): {:?}\n",
@@ -195,12 +192,23 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
 
-    fn simple_model() -> (Vec<f64>, SparseMat, SparseMat, Vec<f64>, Vec<f64>, nalgebra::DMatrix<f64>, f64) {
+    #[allow(clippy::type_complexity)]
+    fn simple_model() -> (
+        Vec<f64>,
+        SparseMat,
+        SparseMat,
+        Vec<f64>,
+        Vec<f64>,
+        nalgebra::DMatrix<f64>,
+        f64,
+    ) {
         // 4 obs, 1 fixed (intercept), 2 random levels
         let y = vec![10.0, 12.0, 6.0, 8.0];
 
         let mut x_tri = sprs::TriMat::new((4, 1));
-        for i in 0..4 { x_tri.add_triplet(i, 0, 1.0); }
+        for i in 0..4 {
+            x_tri.add_triplet(i, 0, 1.0);
+        }
         let x = x_tri.to_csc();
 
         let mut z_tri = sprs::TriMat::new((4, 2));

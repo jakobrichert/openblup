@@ -1,5 +1,5 @@
 use crate::error::{LmmError, Result};
-use crate::matrix::sparse::{sparse_diagonal, sparse_identity};
+use crate::matrix::sparse::sparse_diagonal;
 use crate::types::SparseMat;
 
 use super::traits::VarStruct;

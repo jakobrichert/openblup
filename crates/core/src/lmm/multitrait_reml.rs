@@ -14,10 +14,10 @@ pub struct MultiTraitFitResult {
     pub r0: DMatrix<f64>,
     /// Genetic correlations derived from G0.
     pub genetic_correlations: DMatrix<f64>,
-    /// Fixed effects (BLUE) per trait: fixed_effects[trait_idx][effect_idx].
+    /// Fixed effects (BLUE) per trait: `fixed_effects[trait_idx][effect_idx]`.
     pub fixed_effects: Vec<Vec<NamedEffect>>,
     /// Random effects (BLUP) per trait per random term:
-    /// random_effects[trait_idx][term_idx] is a Vec<f64> of BLUPs.
+    /// `random_effects[trait_idx][term_idx]` is a `Vec<f64>` of BLUPs.
     pub random_effects: Vec<Vec<Vec<f64>>>,
     /// REML log-likelihood at convergence.
     pub log_likelihood: f64,
@@ -96,9 +96,7 @@ impl MultiTraitReml {
             //
             // The coefficient matrix and RHS are built directly in dense form
             // exploiting Kronecker structure.
-            let (coeff, rhs) = self.assemble_mt_mme(
-                model, &r0_inv, &g0_inv, &q_vec,
-            );
+            let (coeff, rhs) = self.assemble_mt_mme(model, &r0_inv, &g0_inv, &q_vec);
 
             // Solve the system
             let chol = coeff
@@ -141,7 +139,8 @@ impl MultiTraitReml {
             for i in 0..t {
                 let y_i = &model.y[i * n..(i + 1) * n];
                 let xb = spmv(&model.x_single, &b_all[i]);
-                let mut residual: Vec<f64> = y_i.iter().zip(xb.iter()).map(|(y, xb)| y - xb).collect();
+                let mut residual: Vec<f64> =
+                    y_i.iter().zip(xb.iter()).map(|(y, xb)| y - xb).collect();
                 for k in 0..n_random {
                     let zu = spmv(&model.z_single_blocks[k], &u_all[i][k]);
                     for j in 0..n {
@@ -197,10 +196,8 @@ impl MultiTraitReml {
                             let mut tr = 0.0;
                             for a in 0..q_k {
                                 for b in 0..q_k {
-                                    let kinv_ab =
-                                        kinv.get(a, b).copied().unwrap_or(0.0);
-                                    let cinv_ba =
-                                        c_inv[(col_start + b, row_start + a)];
+                                    let kinv_ab = kinv.get(a, b).copied().unwrap_or(0.0);
+                                    let cinv_ba = c_inv[(col_start + b, row_start + a)];
                                     tr += kinv_ab * cinv_ba;
                                 }
                             }
@@ -413,11 +410,7 @@ impl MultiTraitReml {
                 let ztz = if k == l {
                     xtx_dense_local(&model.z_single_blocks[k], n)
                 } else {
-                    xtz_dense_local(
-                        &model.z_single_blocks[k],
-                        &model.z_single_blocks[l],
-                        n,
-                    )
+                    xtz_dense_local(&model.z_single_blocks[k], &model.z_single_blocks[l], n)
                 };
                 if k < ztz_vec.len() {
                     ztz_vec[k].push(ztz);
@@ -433,10 +426,7 @@ impl MultiTraitReml {
             xty.push(crate::matrix::sparse::xt_y(&model.x_single, y_i));
             let mut zty_i = Vec::new();
             for k in 0..n_random {
-                zty_i.push(crate::matrix::sparse::xt_y(
-                    &model.z_single_blocks[k],
-                    y_i,
-                ));
+                zty_i.push(crate::matrix::sparse::xt_y(&model.z_single_blocks[k], y_i));
             }
             zty.push(zty_i);
         }
@@ -500,8 +490,7 @@ impl MultiTraitReml {
                     if scale.abs() > 1e-15 {
                         for r in 0..q_vec[k] {
                             for cc in 0..q_vec[k] {
-                                c[(row_base + r, col_base + cc)] +=
-                                    scale * ztz_vec[k][0][(r, cc)];
+                                c[(row_base + r, col_base + cc)] += scale * ztz_vec[k][0][(r, cc)];
                             }
                         }
                     }

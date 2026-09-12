@@ -19,9 +19,10 @@ pub fn sparse_cholesky_factor(a: &CsMat<f64>) -> crate::error::Result<CsMat<f64>
             sum -= l[j][k] * l[j][k];
         }
         if sum <= 0.0 {
-            return Err(crate::error::LmmError::CholeskyFailed(
-                format!("Matrix not positive definite at column {}", j),
-            ));
+            return Err(crate::error::LmmError::CholeskyFailed(format!(
+                "Matrix not positive definite at column {}",
+                j
+            )));
         }
         l[j][j] = sum.sqrt();
 
@@ -69,7 +70,9 @@ pub fn sparse_inverse_subset(l_factor: &CsMat<f64>) -> CsMat<f64> {
     // Z = (LL')⁻¹ = L'^{-1} * L^{-1}
     let l_mat = nalgebra::DMatrix::from_fn(n, n, |i, j| l[i][j]);
     let a = &l_mat * l_mat.transpose();
-    let a_inv = a.try_inverse().unwrap_or_else(|| nalgebra::DMatrix::zeros(n, n));
+    let a_inv = a
+        .try_inverse()
+        .unwrap_or_else(|| nalgebra::DMatrix::zeros(n, n));
 
     // Convert to sparse
     let mut tri = TriMat::new((n, n));
@@ -156,9 +159,8 @@ mod tests {
         let diag = sparse_inverse_diagonal(&l);
 
         // Compare with nalgebra full inverse
-        let a_dense = nalgebra::DMatrix::from_row_slice(3, 3, &[
-            4.0, 2.0, 0.0, 2.0, 5.0, 1.0, 0.0, 1.0, 3.0,
-        ]);
+        let a_dense =
+            nalgebra::DMatrix::from_row_slice(3, 3, &[4.0, 2.0, 0.0, 2.0, 5.0, 1.0, 0.0, 1.0, 3.0]);
         let a_inv = a_dense.try_inverse().unwrap();
 
         for i in 0..3 {
@@ -172,9 +174,8 @@ mod tests {
         let l = sparse_cholesky_factor(&a).unwrap();
         let z = sparse_inverse_subset(&l);
 
-        let a_dense = nalgebra::DMatrix::from_row_slice(3, 3, &[
-            4.0, 2.0, 0.0, 2.0, 5.0, 1.0, 0.0, 1.0, 3.0,
-        ]);
+        let a_dense =
+            nalgebra::DMatrix::from_row_slice(3, 3, &[4.0, 2.0, 0.0, 2.0, 5.0, 1.0, 0.0, 1.0, 3.0]);
         let a_inv = a_dense.try_inverse().unwrap();
 
         // Check all elements of the sparse inverse against the full inverse
@@ -198,9 +199,8 @@ mod tests {
         let trace = trace_ainv_b(&l, &b);
 
         // tr(A⁻¹) should equal sum of diagonal of A⁻¹
-        let a_dense = nalgebra::DMatrix::from_row_slice(3, 3, &[
-            4.0, 2.0, 0.0, 2.0, 5.0, 1.0, 0.0, 1.0, 3.0,
-        ]);
+        let a_dense =
+            nalgebra::DMatrix::from_row_slice(3, 3, &[4.0, 2.0, 0.0, 2.0, 5.0, 1.0, 0.0, 1.0, 3.0]);
         let a_inv = a_dense.try_inverse().unwrap();
         let expected: f64 = (0..3).map(|i| a_inv[(i, i)]).sum();
 

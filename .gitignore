@@ -1,7 +1,9 @@
 # Rust
 /target/
 **/*.rs.bk
-Cargo.lock
+
+# wasm-pack output
+crates/wasm/www/pkg/
 
 # Python
 __pycache__/

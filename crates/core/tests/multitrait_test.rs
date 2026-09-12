@@ -5,6 +5,8 @@
 //!
 //! Model per trait: y = rep (fixed) + genotype (random) + error
 
+#![allow(clippy::needless_range_loop)]
+
 use approx::assert_relative_eq;
 use nalgebra::DMatrix;
 use plant_breeding_lmm_core::data::DataFrame;
@@ -35,14 +37,14 @@ fn create_two_trait_data() -> DataFrame {
 
     // Small, deterministic "residuals" for reproducibility
     let residuals_t1 = [
-        0.1, -0.2, 0.15, -0.1, 0.05,   // rep 1
-        0.2, -0.15, 0.1, -0.05, 0.12,   // rep 2
+        0.1, -0.2, 0.15, -0.1, 0.05, // rep 1
+        0.2, -0.15, 0.1, -0.05, 0.12, // rep 2
         -0.08, 0.03, 0.07, -0.11, 0.06, // rep 3
     ];
     let residuals_t2 = [
-        0.3, -0.4, 0.25, -0.2, 0.1,    // rep 1
-        0.35, -0.3, 0.2, -0.15, 0.25,   // rep 2
-        -0.15, 0.1, 0.15, -0.25, 0.12,  // rep 3
+        0.3, -0.4, 0.25, -0.2, 0.1, // rep 1
+        0.35, -0.3, 0.2, -0.15, 0.25, // rep 2
+        -0.15, 0.1, 0.15, -0.25, 0.12, // rep 3
     ];
 
     let n = genotypes.len() * reps.len(); // 15
@@ -101,21 +103,42 @@ fn test_two_trait_model_converges() {
     println!("{}", result.summary);
 
     // G0 should be positive definite (it was bent if needed)
-    assert!(result.g0.clone().cholesky().is_some(), "G0 must be positive definite");
+    assert!(
+        result.g0.clone().cholesky().is_some(),
+        "G0 must be positive definite"
+    );
 
     // R0 should be positive definite
-    assert!(result.r0.clone().cholesky().is_some(), "R0 must be positive definite");
+    assert!(
+        result.r0.clone().cholesky().is_some(),
+        "R0 must be positive definite"
+    );
 
     // Genetic variances should be positive
-    assert!(result.g0[(0, 0)] > 0.0, "Genetic variance for trait 1 should be > 0");
-    assert!(result.g0[(1, 1)] > 0.0, "Genetic variance for trait 2 should be > 0");
+    assert!(
+        result.g0[(0, 0)] > 0.0,
+        "Genetic variance for trait 1 should be > 0"
+    );
+    assert!(
+        result.g0[(1, 1)] > 0.0,
+        "Genetic variance for trait 2 should be > 0"
+    );
 
     // Residual variances should be positive
-    assert!(result.r0[(0, 0)] > 0.0, "Residual variance for trait 1 should be > 0");
-    assert!(result.r0[(1, 1)] > 0.0, "Residual variance for trait 2 should be > 0");
+    assert!(
+        result.r0[(0, 0)] > 0.0,
+        "Residual variance for trait 1 should be > 0"
+    );
+    assert!(
+        result.r0[(1, 1)] > 0.0,
+        "Residual variance for trait 2 should be > 0"
+    );
 
     // Log-likelihood should be finite
-    assert!(result.log_likelihood.is_finite(), "Log-likelihood should be finite");
+    assert!(
+        result.log_likelihood.is_finite(),
+        "Log-likelihood should be finite"
+    );
 }
 
 #[test]
@@ -149,7 +172,11 @@ fn test_genetic_correlation_positive() {
     assert_relative_eq!(result.genetic_correlations[(1, 1)], 1.0, epsilon = 1e-6);
 
     // Correlation should be between -1 and 1
-    assert!(r_g >= -1.0 && r_g <= 1.0, "Correlation out of bounds: {}", r_g);
+    assert!(
+        (-1.0..=1.0).contains(&r_g),
+        "Correlation out of bounds: {}",
+        r_g
+    );
 }
 
 #[test]
@@ -224,7 +251,10 @@ fn test_two_trait_with_custom_starting_values() {
 
     let result = model.fit_reml().unwrap();
 
-    assert!(result.converged, "Should converge with custom starting values");
+    assert!(
+        result.converged,
+        "Should converge with custom starting values"
+    );
     assert!(result.g0[(0, 0)] > 0.0);
     assert!(result.r0[(0, 0)] > 0.0);
     println!("{}", result.summary);
@@ -247,7 +277,11 @@ fn test_fixed_effects_per_trait() {
     let result = model.fit_reml().unwrap();
 
     // Should have fixed effects for each trait
-    assert_eq!(result.fixed_effects.len(), 2, "Should have fixed effects for 2 traits");
+    assert_eq!(
+        result.fixed_effects.len(),
+        2,
+        "Should have fixed effects for 2 traits"
+    );
 
     // Each trait should have rep effects (3 levels)
     assert_eq!(
@@ -289,12 +323,20 @@ fn test_genetic_variance_larger_than_residual_for_well_separated_genotypes() {
 
     let result = model.fit_reml().unwrap();
 
-    println!("G0 diagonal: [{:.4}, {:.4}]", result.g0[(0, 0)], result.g0[(1, 1)]);
-    println!("R0 diagonal: [{:.4}, {:.4}]", result.r0[(0, 0)], result.r0[(1, 1)]);
+    println!(
+        "G0 diagonal: [{:.4}, {:.4}]",
+        result.g0[(0, 0)],
+        result.g0[(1, 1)]
+    );
+    println!(
+        "R0 diagonal: [{:.4}, {:.4}]",
+        result.r0[(0, 0)],
+        result.r0[(1, 1)]
+    );
 
     // At least one trait should have genetic variance > residual variance
-    let geno_var_dominates = result.g0[(0, 0)] > result.r0[(0, 0)]
-        || result.g0[(1, 1)] > result.r0[(1, 1)];
+    let geno_var_dominates =
+        result.g0[(0, 0)] > result.r0[(0, 0)] || result.g0[(1, 1)] > result.r0[(1, 1)];
     assert!(
         geno_var_dominates,
         "Genetic variance should dominate residual for at least one trait"

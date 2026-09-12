@@ -154,11 +154,7 @@ fn compute_zzt_parallel(z: &DMatrix<f64>, scale: f64) -> DMatrix<f64> {
 ///
 /// * `LmmError::DimensionMismatch` if G and A22 have different dimensions.
 /// * `LmmError::InvalidParameter` if weight is outside [0, 1].
-pub fn blend_g_matrix(
-    g: &DMatrix<f64>,
-    a22: &DMatrix<f64>,
-    weight: f64,
-) -> Result<DMatrix<f64>> {
+pub fn blend_g_matrix(g: &DMatrix<f64>, a22: &DMatrix<f64>, weight: f64) -> Result<DMatrix<f64>> {
     if g.nrows() != a22.nrows() || g.ncols() != a22.ncols() {
         return Err(LmmError::DimensionMismatch {
             expected: g.nrows(),
@@ -185,10 +181,7 @@ pub fn blend_g_matrix(
 /// Returns `LmmError::NotPositiveDefinite` if the Cholesky factorisation
 /// fails.
 pub fn invert_g_matrix(g: &DMatrix<f64>) -> Result<DMatrix<f64>> {
-    let chol = g
-        .clone()
-        .cholesky()
-        .ok_or(LmmError::NotPositiveDefinite)?;
+    let chol = g.clone().cholesky().ok_or(LmmError::NotPositiveDefinite)?;
     Ok(chol.inverse())
 }
 
@@ -217,11 +210,11 @@ mod tests {
     /// ind3:  0   2   1   1
     /// ```
     fn simple_marker_matrix() -> DMatrix<f64> {
-        DMatrix::from_row_slice(3, 4, &[
-            2.0, 0.0, 1.0, 0.0,
-            1.0, 1.0, 0.0, 2.0,
-            0.0, 2.0, 1.0, 1.0,
-        ])
+        DMatrix::from_row_slice(
+            3,
+            4,
+            &[2.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 2.0, 0.0, 2.0, 1.0, 1.0],
+        )
     }
 
     #[test]
@@ -319,12 +312,14 @@ mod tests {
         //
         // With a diverse set of markers and estimated allele freqs,
         // the average diagonal element of G should be close to 1.
-        let m = DMatrix::from_row_slice(4, 6, &[
-            2.0, 0.0, 1.0, 0.0, 1.0, 2.0,
-            0.0, 2.0, 1.0, 2.0, 0.0, 0.0,
-            1.0, 1.0, 0.0, 1.0, 2.0, 1.0,
-            1.0, 1.0, 2.0, 1.0, 1.0, 1.0,
-        ]);
+        let m = DMatrix::from_row_slice(
+            4,
+            6,
+            &[
+                2.0, 0.0, 1.0, 0.0, 1.0, 2.0, 0.0, 2.0, 1.0, 2.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0,
+                2.0, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0, 1.0,
+            ],
+        );
         let g = compute_g_matrix(&m, None).unwrap();
 
         // Average diagonal should be near 1.0 (within reason for 4 individuals).
@@ -357,11 +352,7 @@ mod tests {
     fn test_monomorphic_markers_error() {
         // All markers fixed at 0 (p=0) or fixed at 2 (p=1) -> monomorphic.
         // p*(1-p) = 0 for each marker, so scaling factor is zero.
-        let m = DMatrix::from_row_slice(3, 2, &[
-            0.0, 2.0,
-            0.0, 2.0,
-            0.0, 2.0,
-        ]);
+        let m = DMatrix::from_row_slice(3, 2, &[0.0, 2.0, 0.0, 2.0, 0.0, 2.0]);
         let result = compute_g_matrix(&m, None);
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
@@ -388,10 +379,30 @@ mod tests {
         let blended = blend_g_matrix(&g, &a22, 0.05).unwrap();
 
         // G_blend = 0.95*G + 0.05*A22
-        assert_approx(blended[(0, 0)], 0.95 * 1.0 + 0.05 * 1.0, 1e-12, "blend[0,0]");
-        assert_approx(blended[(0, 1)], 0.95 * 0.3 + 0.05 * 0.0, 1e-12, "blend[0,1]");
-        assert_approx(blended[(1, 0)], 0.95 * 0.3 + 0.05 * 0.0, 1e-12, "blend[1,0]");
-        assert_approx(blended[(1, 1)], 0.95 * 1.1 + 0.05 * 1.0, 1e-12, "blend[1,1]");
+        assert_approx(
+            blended[(0, 0)],
+            0.95 * 1.0 + 0.05 * 1.0,
+            1e-12,
+            "blend[0,0]",
+        );
+        assert_approx(
+            blended[(0, 1)],
+            0.95 * 0.3 + 0.05 * 0.0,
+            1e-12,
+            "blend[0,1]",
+        );
+        assert_approx(
+            blended[(1, 0)],
+            0.95 * 0.3 + 0.05 * 0.0,
+            1e-12,
+            "blend[1,0]",
+        );
+        assert_approx(
+            blended[(1, 1)],
+            0.95 * 1.1 + 0.05 * 1.0,
+            1e-12,
+            "blend[1,1]",
+        );
     }
 
     #[test]

@@ -1,11 +1,12 @@
 use crate::data::DataFrame;
 use crate::error::{LmmError, Result};
+use crate::genetics::{compute_a_inverse_with_inbreeding, Pedigree};
 use crate::types::SparseMat;
 use crate::variance::VarStruct;
 
 use super::design::{
-    build_combined_random_design, build_fixed_design, build_random_design, parse_fixed_formula,
-    FixedEffectLabel, FixedTerm,
+    build_combined_random_design, build_fixed_design, build_random_design,
+    build_random_design_with_levels, parse_fixed_formula, FixedEffectLabel, FixedTerm,
 };
 
 /// A fully specified mixed model, ready for fitting.
@@ -38,21 +39,55 @@ pub struct MixedModel {
 }
 
 /// Builder for constructing a [`MixedModel`].
+///
+/// ```no_run
+/// use plant_breeding_lmm_core::data::DataFrame;
+/// use plant_breeding_lmm_core::genetics::Pedigree;
+/// use plant_breeding_lmm_core::model::MixedModelBuilder;
+/// use plant_breeding_lmm_core::variance::Identity;
+///
+/// # fn main() -> plant_breeding_lmm_core::Result<()> {
+/// let df = DataFrame::from_csv("trial.csv")?;
+/// let ped = Pedigree::from_csv("pedigree.csv")?;
+///
+/// let mut model = MixedModelBuilder::new()
+///     .data(&df)
+///     .response("yield")
+///     .fixed("mu + rep")
+///     .random_pedigree("animal", Identity::new(1.0), &ped)
+///     .build()?;
+/// let result = model.fit_reml()?;
+/// println!("{}", result.summary());
+/// # Ok(())
+/// # }
+/// ```
 pub struct MixedModelBuilder<'a> {
     data: Option<&'a DataFrame>,
     response: Option<String>,
     fixed_formula: Option<String>,
     fixed_terms: Vec<FixedTerm>,
-    random_terms: Vec<RandomTermSpec>,
+    random_terms: Vec<RandomTermSpec<'a>>,
     residual_structure: Option<Box<dyn VarStruct>>,
     max_iter: usize,
     convergence_tol: f64,
 }
 
-struct RandomTermSpec {
+/// Where the levels (columns of Z) of a random term come from.
+enum RandomLevels<'a> {
+    /// Levels are the distinct values observed in the data column.
+    FromData,
+    /// Levels are supplied explicitly (must cover every observed value).
+    Explicit(Vec<String>),
+    /// Levels are the animals of a pedigree, in sorted pedigree order, and
+    /// the term uses the pedigree A⁻¹ as its relationship matrix inverse.
+    Pedigree(&'a Pedigree),
+}
+
+struct RandomTermSpec<'a> {
     column: String,
     variance_structure: Box<dyn VarStruct>,
     ginv: Option<SparseMat>,
+    levels: RandomLevels<'a>,
 }
 
 impl<'a> MixedModelBuilder<'a> {
@@ -83,16 +118,31 @@ impl<'a> MixedModelBuilder<'a> {
     }
 
     /// Set the fixed effects formula (e.g., "mu + rep + block").
+    ///
+    /// Factors are coded with treatment contrasts (see
+    /// [`build_fixed_design`]), so `"mu + rep"` estimates an intercept plus
+    /// the contrasts of every rep level against the first one.
     pub fn fixed(mut self, formula: &str) -> Self {
         self.fixed_formula = Some(formula.to_string());
         self
     }
 
-    /// Add a random effect term.
+    /// Set the fixed effects as explicit terms instead of a formula string.
+    pub fn fixed_terms(mut self, terms: Vec<FixedTerm>) -> Self {
+        self.fixed_terms = terms;
+        self
+    }
+
+    /// Add a random effect term whose levels are the distinct values found
+    /// in the data column.
     ///
     /// - `column`: the grouping factor column name
     /// - `vs`: the variance structure for this random term
-    /// - `ginv`: optional relationship matrix inverse (e.g., A^{-1} for pedigree BLUP)
+    /// - `ginv`: optional relationship matrix inverse (e.g., A⁻¹ or G⁻¹). Its
+    ///   row/column order must match the order of first appearance of the
+    ///   levels in the data; use [`random_with_levels`](Self::random_with_levels)
+    ///   or [`random_pedigree`](Self::random_pedigree) when the matrix has its
+    ///   own ordering.
     pub fn random(
         mut self,
         column: &str,
@@ -103,6 +153,52 @@ impl<'a> MixedModelBuilder<'a> {
             column: column.to_string(),
             variance_structure: Box::new(vs),
             ginv,
+            levels: RandomLevels::FromData,
+        });
+        self
+    }
+
+    /// Add a random effect term with an explicit level ordering.
+    ///
+    /// Column `j` of Z (and row/column `j` of `ginv`) corresponds to
+    /// `levels[j]`. Levels that never occur in the data are allowed and get
+    /// an empty column, which is how ancestors without records enter an
+    /// animal model. Every value observed in the data column must appear in
+    /// `levels`.
+    pub fn random_with_levels(
+        mut self,
+        column: &str,
+        vs: impl VarStruct + 'static,
+        ginv: Option<SparseMat>,
+        levels: Vec<String>,
+    ) -> Self {
+        self.random_terms.push(RandomTermSpec {
+            column: column.to_string(),
+            variance_structure: Box::new(vs),
+            ginv,
+            levels: RandomLevels::Explicit(levels),
+        });
+        self
+    }
+
+    /// Add a pedigree-based random effect (animal model).
+    ///
+    /// The levels of the term are all animals of `pedigree` in topologically
+    /// sorted order, and the relationship matrix inverse is A⁻¹ computed with
+    /// Henderson's rules including inbreeding (Meuwissen & Luo 1992). The
+    /// pedigree is sorted on the fly if needed. Every value in `column` must
+    /// be an animal of the pedigree.
+    pub fn random_pedigree(
+        mut self,
+        column: &str,
+        vs: impl VarStruct + 'static,
+        pedigree: &'a Pedigree,
+    ) -> Self {
+        self.random_terms.push(RandomTermSpec {
+            column: column.to_string(),
+            variance_structure: Box::new(vs),
+            ginv: None,
+            levels: RandomLevels::Pedigree(pedigree),
         });
         self
     }
@@ -143,6 +239,14 @@ impl<'a> MixedModelBuilder<'a> {
 
         // Get response vector
         let y = df.get_float(&response_col)?.to_vec();
+        if let Some(pos) = y.iter().position(|v| !v.is_finite()) {
+            return Err(LmmError::Data(format!(
+                "Response '{}' has a missing or non-finite value at row {}; \
+                 remove such rows first (see DataFrame::drop_missing)",
+                response_col,
+                pos + 1
+            )));
+        }
 
         // Build fixed effects design matrix
         let fixed_terms = if let Some(ref formula) = self.fixed_formula {
@@ -164,10 +268,36 @@ impl<'a> MixedModelBuilder<'a> {
         let mut random_term_names = Vec::new();
 
         for rt in self.random_terms {
-            let (z, levels) = build_random_design(df, &rt.column)?;
+            let (z, levels, ginv) = match rt.levels {
+                RandomLevels::FromData => {
+                    let (z, levels) = build_random_design(df, &rt.column)?;
+                    (z, levels, rt.ginv)
+                }
+                RandomLevels::Explicit(levels) => {
+                    let (z, levels) = build_random_design_with_levels(df, &rt.column, &levels)?;
+                    (z, levels, rt.ginv)
+                }
+                RandomLevels::Pedigree(ped) => {
+                    let sorted;
+                    let ped_ref: &Pedigree = if ped.is_sorted() {
+                        ped
+                    } else {
+                        let mut p = ped.clone();
+                        p.sort_pedigree()?;
+                        sorted = p;
+                        &sorted
+                    };
+                    let ids: Vec<String> = (0..ped_ref.n_animals())
+                        .map(|i| ped_ref.animal_id(i).to_string())
+                        .collect();
+                    let a_inv = compute_a_inverse_with_inbreeding(ped_ref)?;
+                    let (z, levels) = build_random_design_with_levels(df, &rt.column, &ids)?;
+                    (z, levels, Some(a_inv))
+                }
+            };
 
             // Validate ginv dimensions if provided
-            if let Some(ref ginv) = rt.ginv {
+            if let Some(ref ginv) = ginv {
                 let q = levels.len();
                 if ginv.rows() != q || ginv.cols() != q {
                     return Err(LmmError::DimensionMismatch {
@@ -175,7 +305,11 @@ impl<'a> MixedModelBuilder<'a> {
                         got: ginv.rows(),
                         context: format!(
                             "G-inverse for '{}' should be {}x{} but is {}x{}",
-                            rt.column, q, q, ginv.rows(), ginv.cols()
+                            rt.column,
+                            q,
+                            q,
+                            ginv.rows(),
+                            ginv.cols()
                         ),
                     });
                 }
@@ -184,7 +318,7 @@ impl<'a> MixedModelBuilder<'a> {
             z_blocks.push(z);
             random_level_names.push(levels);
             random_var_structs.push(rt.variance_structure);
-            ginv_matrices.push(rt.ginv);
+            ginv_matrices.push(ginv);
             random_term_names.push(rt.column);
         }
 
@@ -225,6 +359,12 @@ impl MixedModel {
         let reml = crate::lmm::AiReml::new(self.max_iter, self.convergence_tol);
         reml.fit(self)
     }
+
+    /// Convenience method: fit the model using EM-REML (slower but very robust).
+    pub fn fit_em_reml(&mut self) -> Result<crate::lmm::FitResult> {
+        let reml = crate::lmm::EmReml::new(self.max_iter, self.convergence_tol);
+        reml.fit(self)
+    }
 }
 
 #[cfg(test)]
@@ -258,10 +398,27 @@ mod tests {
         assert_eq!(model.n_obs, 6);
         assert_eq!(model.y.len(), 6);
         assert_eq!(model.x.rows(), 6);
-        assert_eq!(model.x.cols(), 3); // intercept + 2 rep levels
+        assert_eq!(model.x.cols(), 2); // intercept + (2 rep levels - reference)
         assert_eq!(model.z_blocks.len(), 1);
         assert_eq!(model.z_blocks[0].cols(), 3); // 3 genotypes
         assert_eq!(model.random_term_names, vec!["genotype"]);
+    }
+
+    #[test]
+    fn test_builder_intercept_plus_factor_fits() {
+        // Regression test: "mu + rep" used to produce a rank-deficient X and a
+        // singular coefficient matrix.
+        let df = sample_df();
+        let mut model = MixedModelBuilder::new()
+            .data(&df)
+            .response("yield")
+            .fixed("mu + rep")
+            .random("genotype", Identity::new(1.0), None)
+            .build()
+            .unwrap();
+        let result = model.fit_reml().unwrap();
+        assert_eq!(result.n_fixed_params, 2);
+        assert!(result.log_likelihood.is_finite());
     }
 
     #[test]
@@ -278,6 +435,21 @@ mod tests {
         let df = sample_df();
         let result = MixedModelBuilder::new().data(&df).fixed("mu").build();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_builder_missing_response_errors() {
+        let mut df = DataFrame::new();
+        df.add_float_column("y", vec![1.0, f64::NAN, 3.0]).unwrap();
+        df.add_factor_column("g", &["a", "b", "a"]).unwrap();
+        let err = MixedModelBuilder::new()
+            .data(&df)
+            .response("y")
+            .random("g", Identity::new(1.0), None)
+            .build()
+            .err()
+            .expect("build should fail");
+        assert!(err.to_string().contains("row 2"));
     }
 
     #[test]
@@ -308,5 +480,88 @@ mod tests {
             .random("genotype", Identity::new(1.0), Some(wrong_ginv))
             .build();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_builder_random_with_levels() {
+        let df = sample_df();
+        let levels: Vec<String> = ["G3", "G2", "G1", "G0"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let model = MixedModelBuilder::new()
+            .data(&df)
+            .response("yield")
+            .fixed("rep")
+            .random_with_levels("genotype", Identity::new(1.0), None, levels.clone())
+            .build()
+            .unwrap();
+        assert_eq!(model.z_blocks[0].cols(), 4);
+        assert_eq!(model.random_level_names[0], levels);
+    }
+
+    #[test]
+    fn test_builder_random_pedigree_orders_levels_like_pedigree() {
+        // Data only has records on animals 3 and 4; animals 1 and 2 are
+        // parents without records and must still get columns.
+        let mut df = DataFrame::new();
+        df.add_float_column("y", vec![4.5, 2.9, 3.9]).unwrap();
+        df.add_factor_column("animal", &["4", "3", "4"]).unwrap();
+
+        let triples = vec![
+            (
+                "3".to_string(),
+                Some("1".to_string()),
+                Some("2".to_string()),
+            ),
+            (
+                "4".to_string(),
+                Some("1".to_string()),
+                Some("2".to_string()),
+            ),
+            ("1".to_string(), None, None),
+            ("2".to_string(), None, None),
+        ];
+        let ped = Pedigree::from_triples(&triples).unwrap(); // deliberately unsorted
+
+        let model = MixedModelBuilder::new()
+            .data(&df)
+            .response("y")
+            .fixed("mu")
+            .random_pedigree("animal", Identity::new(1.0), &ped)
+            .build()
+            .unwrap();
+
+        assert_eq!(model.z_blocks[0].cols(), 4);
+        let levels = &model.random_level_names[0];
+        assert_eq!(levels.len(), 4);
+        // Parents must come before offspring in the level order.
+        let pos = |id: &str| levels.iter().position(|l| l == id).unwrap();
+        assert!(pos("1") < pos("3"));
+        assert!(pos("2") < pos("3"));
+        assert!(pos("1") < pos("4"));
+        let ginv = model.ginv_matrices[0].as_ref().unwrap();
+        assert_eq!(ginv.rows(), 4);
+        assert_eq!(ginv.cols(), 4);
+    }
+
+    #[test]
+    fn test_builder_random_pedigree_unknown_animal_errors() {
+        let mut df = DataFrame::new();
+        df.add_float_column("y", vec![4.5, 2.9]).unwrap();
+        df.add_factor_column("animal", &["4", "99"]).unwrap();
+        let triples = vec![
+            ("1".to_string(), None, None),
+            ("4".to_string(), Some("1".to_string()), None),
+        ];
+        let ped = Pedigree::from_triples(&triples).unwrap();
+        let err = MixedModelBuilder::new()
+            .data(&df)
+            .response("y")
+            .random_pedigree("animal", Identity::new(1.0), &ped)
+            .build()
+            .err()
+            .expect("build should fail");
+        assert!(err.to_string().contains("99"));
     }
 }

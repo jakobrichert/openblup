@@ -1,5 +1,5 @@
-use crate::types::SparseMat;
 use crate::error::Result;
+use crate::types::SparseMat;
 
 /// Core trait that every variance structure must implement.
 ///

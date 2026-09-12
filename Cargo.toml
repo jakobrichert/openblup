@@ -37,6 +37,8 @@ pyo3 = { version = "0.23", features = ["extension-module"] }
 numpy = "0.23"
 # CLI
 clap = { version = "4", features = ["derive"] }
+# WebAssembly
+wasm-bindgen = "0.2"
 # Random / testing
 rand = "0.8"
 approx = "0.5"

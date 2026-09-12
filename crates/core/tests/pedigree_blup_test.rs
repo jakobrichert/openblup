@@ -46,6 +46,8 @@
 //!            Verified against BLUPF90 solutions:
 //!            https://masuday.github.io/blupf90_tutorial/mrode_c03ex031_animal_model.html
 
+#![allow(clippy::needless_range_loop)]
+
 use approx::assert_relative_eq;
 use sprs::TriMat;
 
@@ -244,14 +246,38 @@ fn test_mrode_example_3_1_dense_verification() {
     }
 
     let animals = [
-        AnimalInfo { sire: None, dam: None },           // 1
-        AnimalInfo { sire: None, dam: None },           // 2
-        AnimalInfo { sire: None, dam: None },           // 3
-        AnimalInfo { sire: Some(0), dam: None },        // 4 (sire=1)
-        AnimalInfo { sire: Some(2), dam: Some(1) },     // 5 (sire=3, dam=2)
-        AnimalInfo { sire: Some(0), dam: Some(1) },     // 6 (sire=1, dam=2)
-        AnimalInfo { sire: Some(3), dam: Some(4) },     // 7 (sire=4, dam=5)
-        AnimalInfo { sire: Some(2), dam: Some(5) },     // 8 (sire=3, dam=6)
+        AnimalInfo {
+            sire: None,
+            dam: None,
+        }, // 1
+        AnimalInfo {
+            sire: None,
+            dam: None,
+        }, // 2
+        AnimalInfo {
+            sire: None,
+            dam: None,
+        }, // 3
+        AnimalInfo {
+            sire: Some(0),
+            dam: None,
+        }, // 4 (sire=1)
+        AnimalInfo {
+            sire: Some(2),
+            dam: Some(1),
+        }, // 5 (sire=3, dam=2)
+        AnimalInfo {
+            sire: Some(0),
+            dam: Some(1),
+        }, // 6 (sire=1, dam=2)
+        AnimalInfo {
+            sire: Some(3),
+            dam: Some(4),
+        }, // 7 (sire=4, dam=5)
+        AnimalInfo {
+            sire: Some(2),
+            dam: Some(5),
+        }, // 8 (sire=3, dam=6)
     ];
 
     for (i, anim) in animals.iter().enumerate() {
@@ -295,12 +321,17 @@ fn test_mrode_example_3_1_dense_verification() {
 
     // X'Z and Z'X
     // Male animals: 4 (idx 3), 7 (idx 6), 8 (idx 7)
-    c[(0, p + 3)] = 1.0; c[(p + 3, 0)] = 1.0;
-    c[(0, p + 6)] = 1.0; c[(p + 6, 0)] = 1.0;
-    c[(0, p + 7)] = 1.0; c[(p + 7, 0)] = 1.0;
+    c[(0, p + 3)] = 1.0;
+    c[(p + 3, 0)] = 1.0;
+    c[(0, p + 6)] = 1.0;
+    c[(p + 6, 0)] = 1.0;
+    c[(0, p + 7)] = 1.0;
+    c[(p + 7, 0)] = 1.0;
     // Female animals: 5 (idx 4), 6 (idx 5)
-    c[(1, p + 4)] = 1.0; c[(p + 4, 1)] = 1.0;
-    c[(1, p + 5)] = 1.0; c[(p + 5, 1)] = 1.0;
+    c[(1, p + 4)] = 1.0;
+    c[(p + 4, 1)] = 1.0;
+    c[(1, p + 5)] = 1.0;
+    c[(p + 5, 1)] = 1.0;
 
     // Z'Z + alpha * A^{-1}
     // Z'Z diagonal: 1 for animals with records (4,5,6,7,8), 0 for founders (1,2,3)
@@ -315,16 +346,19 @@ fn test_mrode_example_3_1_dense_verification() {
 
     // RHS: [X'y; Z'y]
     let mut rhs = nalgebra::DVector::<f64>::zeros(dim);
-    rhs[0] = 4.5 + 3.5 + 5.0;     // male X'y: animals 4, 7, 8
-    rhs[1] = 2.9 + 3.9;            // female X'y: animals 5, 6
-    rhs[p + 3] = 4.5;              // animal 4
-    rhs[p + 4] = 2.9;              // animal 5
-    rhs[p + 5] = 3.9;              // animal 6
-    rhs[p + 6] = 3.5;              // animal 7
-    rhs[p + 7] = 5.0;              // animal 8
+    rhs[0] = 4.5 + 3.5 + 5.0; // male X'y: animals 4, 7, 8
+    rhs[1] = 2.9 + 3.9; // female X'y: animals 5, 6
+    rhs[p + 3] = 4.5; // animal 4
+    rhs[p + 4] = 2.9; // animal 5
+    rhs[p + 5] = 3.9; // animal 6
+    rhs[p + 6] = 3.5; // animal 7
+    rhs[p + 7] = 5.0; // animal 8
 
     // Solve.
-    let chol = c.clone().cholesky().expect("MME should be positive definite");
+    let chol = c
+        .clone()
+        .cholesky()
+        .expect("MME should be positive definite");
     let sol = chol.solve(&rhs);
 
     println!("Dense BLUEs: male={:.5}, female={:.5}", sol[0], sol[1]);
@@ -336,7 +370,7 @@ fn test_mrode_example_3_1_dense_verification() {
     assert_relative_eq!(sol[0], 4.35850, epsilon = 0.001);
     assert_relative_eq!(sol[1], 3.40443, epsilon = 0.001);
 
-    assert_relative_eq!(sol[p + 0], 0.09844, epsilon = 0.001);
+    assert_relative_eq!(sol[p], 0.09844, epsilon = 0.001);
     assert_relative_eq!(sol[p + 1], -0.01877, epsilon = 0.001);
     assert_relative_eq!(sol[p + 2], -0.04108, epsilon = 0.001);
     assert_relative_eq!(sol[p + 3], -0.00866, epsilon = 0.001);
@@ -374,7 +408,9 @@ fn test_mrode_example_3_1_a_inverse() {
         assert!(
             dense[i][i] > 0.0,
             "A-inverse diagonal [{},{}] should be positive, got {}",
-            i, i, dense[i][i]
+            i,
+            i,
+            dense[i][i]
         );
     }
 
@@ -413,8 +449,7 @@ fn test_mrode_example_3_1_reml_convergence() {
 
     // Initialize variance components from data variance.
     let y_mean: f64 = y.iter().sum::<f64>() / n_obs as f64;
-    let y_var: f64 =
-        y.iter().map(|yi| (yi - y_mean).powi(2)).sum::<f64>() / (n_obs - 1) as f64;
+    let y_var: f64 = y.iter().map(|yi| (yi - y_mean).powi(2)).sum::<f64>() / (n_obs - 1) as f64;
 
     let mut sigma2_a = y_var / 2.0;
     let mut sigma2_e = y_var / 2.0;
@@ -431,7 +466,7 @@ fn test_mrode_example_3_1_reml_convergence() {
         let r_inv_scale = 1.0 / sigma2_e;
 
         let mme =
-            MixedModelEquations::assemble(&x, &[z.clone()], &y, r_inv_scale, &[g_inv]);
+            MixedModelEquations::assemble(&x, std::slice::from_ref(&z), &y, r_inv_scale, &[g_inv]);
         let sol = mme.solve().unwrap();
 
         let c_inv = sol.c_inv.as_ref().unwrap();
@@ -491,10 +526,7 @@ fn test_mrode_example_3_1_reml_convergence() {
         }
     }
 
-    println!(
-        "REML converged: {} in {} iterations",
-        converged, n_iter
-    );
+    println!("REML converged: {} in {} iterations", converged, n_iter);
     println!(
         "Estimated sigma^2_a = {:.4}, sigma^2_e = {:.4}",
         sigma2_a, sigma2_e
@@ -510,7 +542,7 @@ fn test_mrode_example_3_1_reml_convergence() {
     let g_inv = a_inv.map(|v| v / sigma2_a.max(1e-10));
     let r_inv_scale = 1.0 / sigma2_e;
     let mme =
-        MixedModelEquations::assemble(&x, &[z.clone()], &y, r_inv_scale, &[g_inv]);
+        MixedModelEquations::assemble(&x, std::slice::from_ref(&z), &y, r_inv_scale, &[g_inv]);
     let sol = mme.solve().unwrap();
 
     // BLUEs: males should have higher estimated mean gain than females.
@@ -518,7 +550,10 @@ fn test_mrode_example_3_1_reml_convergence() {
     // Data female mean = (2.9 + 3.9)/2 = 3.4
     let blue_male = sol.fixed_effects[0];
     let blue_female = sol.fixed_effects[1];
-    println!("REML BLUEs: male = {:.4}, female = {:.4}", blue_male, blue_female);
+    println!(
+        "REML BLUEs: male = {:.4}, female = {:.4}",
+        blue_male, blue_female
+    );
     assert!(
         blue_male > blue_female,
         "Male BLUE ({:.4}) should exceed female BLUE ({:.4})",
@@ -572,7 +607,9 @@ fn test_mrode_example_3_1_mme_structure() {
         assert!(
             mme.coeff_matrix[(i, i)] > 0.0,
             "C[{},{}] should be positive, got {}",
-            i, i, mme.coeff_matrix[(i, i)]
+            i,
+            i,
+            mme.coeff_matrix[(i, i)]
         );
     }
 
@@ -592,4 +629,117 @@ fn test_mrode_example_3_1_mme_structure() {
     //   female: (2.9 + 3.9) / 40 = 6.8 / 40 = 0.17
     assert_relative_eq!(mme.rhs[0], 13.0 / 40.0, epsilon = 1e-10);
     assert_relative_eq!(mme.rhs[1], 6.8 / 40.0, epsilon = 1e-10);
+}
+
+/// Test 6: The same Mrode Example 3.1 fitted through the public builder API,
+/// i.e. the path the CLI and the Python bindings use.
+///
+/// The data frame only contains the five animals with records; the builder
+/// must still produce a Z with one column per pedigree animal (in sorted
+/// pedigree order) so that A⁻¹ lines up with the random effects.
+#[test]
+fn test_mrode_example_3_1_via_builder() {
+    use plant_breeding_lmm_core::data::DataFrame;
+    use plant_breeding_lmm_core::model::MixedModelBuilder;
+    use plant_breeding_lmm_core::variance::Identity;
+
+    // Deliberately unsorted pedigree (offspring listed before parents).
+    let triples = vec![
+        (
+            "8".to_string(),
+            Some("3".to_string()),
+            Some("6".to_string()),
+        ),
+        (
+            "7".to_string(),
+            Some("4".to_string()),
+            Some("5".to_string()),
+        ),
+        (
+            "6".to_string(),
+            Some("1".to_string()),
+            Some("2".to_string()),
+        ),
+        (
+            "5".to_string(),
+            Some("3".to_string()),
+            Some("2".to_string()),
+        ),
+        ("4".to_string(), Some("1".to_string()), None),
+        ("3".to_string(), None, None),
+        ("2".to_string(), None, None),
+        ("1".to_string(), None, None),
+    ];
+    let ped = Pedigree::from_triples(&triples).unwrap();
+
+    let mut df = DataFrame::new();
+    df.add_float_column("pwg", vec![4.5, 2.9, 3.9, 3.5, 5.0])
+        .unwrap();
+    df.add_factor_column("animal", &["4", "5", "6", "7", "8"])
+        .unwrap();
+    df.add_factor_column("sex", &["male", "female", "female", "male", "male"])
+        .unwrap();
+
+    let model = MixedModelBuilder::new()
+        .data(&df)
+        .response("pwg")
+        .fixed("sex")
+        .random_pedigree("animal", Identity::new(1.0), &ped)
+        .build()
+        .unwrap();
+
+    assert_eq!(model.x.cols(), 2);
+    assert_eq!(model.z_blocks[0].cols(), 8);
+    let levels = &model.random_level_names[0];
+    assert_eq!(levels.len(), 8);
+
+    // Solve the MME with Mrode's known variance components.
+    let sigma2_a = 20.0;
+    let sigma2_e = 40.0;
+    let g_inv = model.ginv_matrices[0]
+        .as_ref()
+        .unwrap()
+        .map(|v| v / sigma2_a);
+    let mme = MixedModelEquations::assemble(
+        &model.x,
+        &model.z_blocks,
+        &model.y,
+        1.0 / sigma2_e,
+        &[g_inv],
+    );
+    let sol = mme.solve().unwrap();
+
+    // Fixed effects: "sex" has no intercept, so both levels are estimated
+    // (male first because it appears first in the data).
+    assert_eq!(model.fixed_labels[0].level, "male");
+    assert_eq!(model.fixed_labels[1].level, "female");
+    assert_relative_eq!(sol.fixed_effects[0], 4.35850, epsilon = 0.001);
+    assert_relative_eq!(sol.fixed_effects[1], 3.40443, epsilon = 0.001);
+
+    let expected_blups = [
+        ("1", 0.09844),
+        ("2", -0.01877),
+        ("3", -0.04108),
+        ("4", -0.00866),
+        ("5", -0.18573),
+        ("6", 0.17687),
+        ("7", -0.24946),
+        ("8", 0.18261),
+    ];
+    for (animal_id, expected) in &expected_blups {
+        let idx = levels.iter().position(|l| l == animal_id).unwrap();
+        assert_relative_eq!(sol.random_effects[0][idx], expected, epsilon = 0.001);
+    }
+
+    // And the full REML fit runs and reports the effects under their IDs.
+    let mut model = model;
+    let result = model.fit_em_reml().unwrap();
+    assert_eq!(result.random_effects[0].effects.len(), 8);
+    for (animal_id, _) in &expected_blups {
+        assert!(result.random_effects[0]
+            .effects
+            .iter()
+            .any(|e| &e.level == animal_id));
+    }
+    assert!(result.log_likelihood.is_finite());
 }

@@ -4,7 +4,7 @@ use sprs::TriMat;
 
 use super::traits::VarStruct;
 
-/// First-order autoregressive variance structure: Sigma[i,j] = sigma^2 * rho^|i-j|.
+/// First-order autoregressive variance structure: `Sigma[i,j] = sigma^2 * rho^|i-j|`.
 ///
 /// Parameters: [sigma^2, rho] where sigma^2 > 0 and -1 < rho < 1.
 ///
@@ -83,7 +83,7 @@ impl VarStruct for AR1 {
         let mut tri = TriMat::new((dim, dim));
         for i in 0..dim {
             for j in 0..dim {
-                let dist = if i > j { i - j } else { j - i };
+                let dist = i.abs_diff(j);
                 let val = self.sigma2 * self.rho.powi(dist as i32);
                 if val.abs() > 1e-15 {
                     tri.add_triplet(i, j, val);
@@ -197,7 +197,7 @@ impl VarStruct for AR1 {
         // For off-diagonal: T[i,i+1] = -rho, dT/drho = -1
         //   => derivative = ds/drho * (-rho) + s * (-1)
         for i in 0..dim - 1 {
-            let val = ds_drho * (-rho) + s * (-1.0);
+            let val = ds_drho * (-rho) + -s;
             tri.add_triplet(i, i + 1, val);
             tri.add_triplet(i + 1, i, val);
         }
@@ -259,7 +259,7 @@ mod tests {
         // Check that Sigma[i,j] = sigma^2 * rho^|i-j|
         for i in 0..4 {
             for j in 0..4 {
-                let dist = if i > j { i - j } else { j - i };
+                let dist = usize::abs_diff(i, j);
                 let expected = sigma2 * rho.powi(dist as i32);
                 let actual = get_entry(&cov, i, j);
                 assert_relative_eq!(actual, expected, epsilon = 1e-10);
@@ -386,8 +386,8 @@ mod tests {
 
         for i in 0..dim {
             for j in 0..dim {
-                let numerical = (get_entry(&inv_plus, i, j) - get_entry(&inv_minus, i, j))
-                    / (2.0 * eps);
+                let numerical =
+                    (get_entry(&inv_plus, i, j) - get_entry(&inv_minus, i, j)) / (2.0 * eps);
                 let analytical = get_entry(d_sigma2, i, j);
                 assert_relative_eq!(analytical, numerical, epsilon = 1e-5);
             }
@@ -413,8 +413,8 @@ mod tests {
 
         for i in 0..dim {
             for j in 0..dim {
-                let numerical = (get_entry(&inv_plus, i, j) - get_entry(&inv_minus, i, j))
-                    / (2.0 * eps);
+                let numerical =
+                    (get_entry(&inv_plus, i, j) - get_entry(&inv_minus, i, j)) / (2.0 * eps);
                 let analytical = get_entry(d_rho, i, j);
                 assert_relative_eq!(analytical, numerical, epsilon = 1e-4);
             }
