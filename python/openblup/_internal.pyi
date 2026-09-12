@@ -158,7 +158,8 @@ class FitResult:
     def wald_tests(self, ddf: str = "containment") -> List[Dict[str, Any]]:
         """Wald F-tests per fixed term (keys term, f_statistic, num_df, den_df,
         p_value, ddf_method). ``ddf`` is "containment" or "satterthwaite"
-        (scaled-identity AI-REML fits; otherwise falls back to containment)."""
+        (AI-REML fits with no parameter on the boundary; otherwise falls back
+        to containment)."""
         ...
     def log_likelihood(self) -> float: ...
     def aic(self) -> float: ...

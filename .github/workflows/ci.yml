@@ -33,6 +33,9 @@ jobs:
         run: cargo build -p plant-breeding-lmm-core --features gpu
       - name: Test
         run: cargo test --workspace
+      - name: Large-scale sparse MME test (release)
+        if: runner.os == 'Linux'
+        run: cargo test --release -p plant-breeding-lmm-core --test sparse_mme_test -- --ignored
       - name: Docs
         if: runner.os == 'Linux'
         env:

@@ -79,8 +79,13 @@ cd openblup
 # Build
 cargo build --workspace
 
-# Run tests
+# Run tests (dependencies are built optimised even in debug mode, see the
+# workspace Cargo.toml, so the linear algebra in the tests stays fast)
 cargo test --workspace
+
+# Large-scale sparse MME test (4 000-animal pedigree model); ignored by
+# default because it needs a release build to run in reasonable time
+cargo test --release -p plant-breeding-lmm-core --test sparse_mme_test -- --ignored
 
 # Run a specific test
 cargo test -p plant-breeding-lmm-core test_mrode_example

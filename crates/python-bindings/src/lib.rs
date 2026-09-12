@@ -980,8 +980,8 @@ impl PyFitResult {
     /// term, f_statistic, num_df, den_df, p_value, ddf_method.
     ///
     /// `ddf` is "containment" (n - rank(X), default) or "satterthwaite"
-    /// (available for scaled-identity models fitted with AI-REML; falls back
-    /// to containment otherwise, see the ddf_method key).
+    /// (available after an AI-REML fit with no variance parameter on the
+    /// boundary; falls back to containment otherwise, see the ddf_method key).
     #[pyo3(signature = (ddf="containment"))]
     fn wald_tests<'py>(&self, py: Python<'py>, ddf: &str) -> PyResult<Vec<Bound<'py, PyDict>>> {
         match ddf.to_lowercase().as_str() {

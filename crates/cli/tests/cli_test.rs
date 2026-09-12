@@ -273,6 +273,8 @@ fn fit_ar1_by_ar1_residual_on_field_grid() {
             "genotype",
             "--residual",
             "row:ar1*col:ar1c",
+            "--ddf",
+            "satterthwaite",
             "--format",
             "json",
         ])
@@ -303,8 +305,13 @@ fn fit_ar1_by_ar1_residual_on_field_grid() {
             assert!(rho.abs() < 1.0, "{}", p);
         }
     }
-    // Satterthwaite is not available for structured residuals -> containment.
-    assert_eq!(json["ddf_method"], "containment");
+    // Satterthwaite df are available for structured models too (the general
+    // engine provides the fixed-effects covariance derivatives).
+    assert_eq!(json["ddf_method"], "satterthwaite");
+    for t in json["wald_tests"].as_array().unwrap() {
+        let den = t["den_df"].as_f64().unwrap();
+        assert!((1.0..=15.0 + 1e-9).contains(&den), "{}", t);
+    }
 }
 
 #[test]

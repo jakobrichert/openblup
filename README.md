@@ -23,7 +23,7 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 ### Core Engine
 - **AI-REML** (Average Information) with exact REML scores, a likelihood safeguard and EM burn-in/fallback; parameters that reach zero are fixed at the boundary and reported as such (like ASReml's `B`)
 - **General multi-parameter REML engine**: any combination of the variance structures below, for random terms, `outer:inner` interaction terms (`Σ_outer ⊗ Σ_inner`, optionally with a pedigree inner factor) and the residual, all validated against dense reference likelihoods and numerical gradients
-- **Henderson's Mixed Model Equations** (MME) assembly and solve
+- **Henderson's Mixed Model Equations** (MME): sparse assembly, sparse Cholesky (faer, AMD ordering) and a Takahashi inverse subset for the traces, prediction error variances and leverages REML needs; dense assembly for structured residuals
 - **BLUP/BLUE** extraction with standard errors, reliabilities and the full fixed-effects covariance matrix
 - **Treatment contrasts** for factors (`mu + rep` is full rank, like R's `model.matrix`)
 - **Wald F-tests** for fixed effects using the full covariance block, containment or Satterthwaite denominator df
@@ -79,10 +79,10 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 - Browser demo page in `crates/wasm/www`
 
 ### Current limitations (honest status)
-- The MME are assembled and solved **densely**. The sparse Cholesky and sparse-inverse-subset code in `crates/core/src/matrix` exists and is tested, but is not yet wired into the REML engines, so practical problem size is a few thousand equations.
+- Models with an IID residual (animal, genomic and plant-trial models) assemble the MME **sparsely** and solve them with a sparse Cholesky factorization (fill-reducing ordering) plus a Takahashi inverse subset, so the number of equations is limited by memory for the factor rather than by a dense inverse. Models with structured residuals or dense variance structures (AR1 x AR1 residuals, FA / unstructured terms) use the general engine, which assembles and inverts `C` densely; keep those to a few thousand equations.
 - The `gpu` feature compiles a backend *interface* only; all computation runs on the CPU until a `wgpu` backend is contributed.
 - Multi-trait models use EM-REML only; Kenward-Roger degrees of freedom are not implemented.
-- Satterthwaite denominator df and leverage-based residual diagnostics are available for models whose components are all single scaled variances with an IID residual (identity / relationship-matrix terms) fitted by AI-REML. For structured models the Wald tests fall back to containment df (the output says which).
+- Satterthwaite denominator df need the average-information matrix, so they are available after an AI-REML fit with no variance parameter on the boundary (any variance structure); otherwise the Wald tests fall back to containment df (the output says which). Leverage-based residual diagnostics need an IID residual.
 - `--cv` / `cross_validate()` handle models with a single random term (genomic or pedigree prediction).
 
 ## Quick Start (Rust)
@@ -246,6 +246,9 @@ cargo build --release
 # Run all Rust tests (core unit tests, integration tests, CLI end-to-end tests, wasm crate)
 cargo test --workspace
 
+# Large-scale check (4 000-animal pedigree model) — ignored by default, run in release mode
+cargo test --release -p plant-breeding-lmm-core --test sparse_mme_test -- --ignored
+
 # Lints used in CI
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
@@ -335,7 +338,7 @@ The algorithms implemented here are based on well-established quantitative genet
 | Spatial (AR1xAR1) | Yes | Yes | No | **Yes** |
 | Multi-trait | Yes | Yes | Yes | **Yes (EM-REML)** |
 | Factor analytic | Yes | Limited | No | **Yes** |
-| Sparse solver | Yes | No | Yes | **Partial (dense MME; sparse Cholesky not yet wired in)** |
+| Sparse solver | Yes | No | Yes | **Yes** (sparse Cholesky + Takahashi inverse subset; dense for structured residuals) |
 | Python API | No | No | No | **Yes (PyO3)** |
 | CLI tool | Yes | No | No | **Yes** |
 | Wald tests | Yes | Yes | Yes | **Yes** |

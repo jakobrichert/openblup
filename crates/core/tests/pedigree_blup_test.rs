@@ -494,7 +494,7 @@ fn test_mrode_example_3_1_reml_convergence() {
         for i in 0..n_animals {
             for j in 0..n_animals {
                 let ainv_ij = a_inv.get(i, j).copied().unwrap_or(0.0);
-                let cinv_ji = c_inv[(n_fixed + j, n_fixed + i)];
+                let cinv_ji = c_inv.entry(n_fixed + j, n_fixed + i);
                 trace_term += ainv_ij * cinv_ji;
             }
         }

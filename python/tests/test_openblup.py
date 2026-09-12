@@ -300,8 +300,10 @@ class TestPackage(unittest.TestCase):
         self.assertTrue(-1.0 < by_name["col.rho"] < 1.0)
         # Structured residuals have no leverage-based diagnostics.
         self.assertIsNone(result.residual_diagnostics())
-        # Satterthwaite is not available here and falls back to containment.
-        self.assertEqual(result.wald_tests(ddf="satterthwaite")[0]["ddf_method"], "containment")
+        # Satterthwaite df are available for structured models as well.
+        satt = result.wald_tests(ddf="satterthwaite")
+        self.assertEqual(satt[0]["ddf_method"], "satterthwaite")
+        self.assertTrue(all(1.0 <= t["den_df"] <= 15.0 + 1e-9 for t in satt))
 
     def test_factor_analytic_gxe(self):
         model = MixedModel()

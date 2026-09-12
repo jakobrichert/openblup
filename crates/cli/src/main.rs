@@ -66,7 +66,8 @@ enum OutputFormat {
 enum Ddf {
     /// n - rank(X)
     Containment,
-    /// Satterthwaite approximation (scaled-identity models fitted with AI-REML)
+    /// Satterthwaite approximation (AI-REML fits with no variance parameter
+    /// on the boundary; otherwise falls back to containment)
     Satterthwaite,
 }
 
@@ -556,8 +557,8 @@ fn cmd_fit(opts: FitOptions) -> Result<()> {
     let (tests, ddf_used) = wald_tests_for(&result, opts.ddf);
     if opts.ddf == Ddf::Satterthwaite && ddf_used == Ddf::Containment {
         eprintln!(
-            "Warning: Satterthwaite df need a scaled-identity model fitted with AI-REML; \
-             reporting containment df instead."
+            "Warning: Satterthwaite df need an AI-REML fit with no variance parameter on \
+             the boundary; reporting containment df instead."
         );
     }
 

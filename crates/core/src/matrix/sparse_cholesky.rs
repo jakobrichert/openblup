@@ -5,6 +5,15 @@
 //! (done once when the sparsity pattern is established) from numeric factorization
 //! (redone each REML iteration as variance components change).
 //!
+//! The factorization is always *simplicial* (column-by-column, stored as a
+//! CSC lower-triangular factor with a fill-reducing AMD ordering). That keeps
+//! the diagonal of `L` directly accessible for the log-determinant and lets
+//! [`SparseCholeskySolver::inverse_subset`] run the Takahashi recurrences on
+//! the factor to obtain every entry of `A⁻¹` within the sparsity pattern of
+//! `L + L'` — which contains the pattern of `A` — without forming the dense
+//! inverse. Those entries are exactly what REML needs (`tr(G⁻¹ C^{kk})`,
+//! prediction error variances, leverages).
+//!
 //! # Usage
 //! ```ignore
 //! let solver = SparseCholeskySolver::new(&mme_matrix)?;
@@ -20,12 +29,15 @@ use crate::types::SparseMat;
 
 use faer::dyn_stack::{GlobalPodBuffer, PodStack};
 use faer::sparse::linalg::cholesky::{
-    factorize_symbolic_cholesky, LltRef, SymbolicCholesky, SymbolicCholeskyRaw,
+    factorize_symbolic_cholesky, CholeskySymbolicParams, LltRef, SymbolicCholesky,
+    SymbolicCholeskyRaw,
 };
+use faer::sparse::linalg::SupernodalThreshold;
 use faer::sparse::{CreationError, SparseColMat};
 use faer::Index as FaerIndex; // for .zx() method on index types
 use faer::Parallelism;
 use faer::Side;
+use sprs::TriMat;
 
 /// Convert an sprs CsMat<f64> (CSC) to faer's SparseColMat<usize, f64>.
 ///
@@ -70,6 +82,7 @@ fn sprs_to_faer_upper(
 ///
 /// Internally uses faer's `SymbolicCholesky` + `LLT` factorization with
 /// fill-reducing AMD ordering.
+#[derive(Debug)]
 pub struct SparseCholeskySolver {
     /// Symbolic factorization (fill-reducing permutation + elimination tree).
     symbolic: SymbolicCholesky<usize>,
@@ -98,12 +111,17 @@ impl SparseCholeskySolver {
         // Convert to faer upper-triangular CSC
         let faer_mat = sprs_to_faer_upper(matrix)?;
 
-        // Symbolic analysis with AMD ordering
+        // Symbolic analysis with AMD ordering. The simplicial factorization
+        // is forced so that L is available column by column (see module docs).
+        let params = CholeskySymbolicParams {
+            supernodal_flop_ratio_threshold: SupernodalThreshold::FORCE_SIMPLICIAL,
+            ..Default::default()
+        };
         let symbolic = factorize_symbolic_cholesky(
             faer_mat.symbolic(),
             Side::Upper,
             Default::default(), // SymmetricOrdering::default() = Amd
-            Default::default(), // CholeskySymbolicParams::default()
+            params,
         )
         .map_err(|e| LmmError::CholeskyFailed(format!("Symbolic factorization failed: {e}")))?;
 
@@ -212,129 +230,137 @@ impl SparseCholeskySolver {
     ///
     /// This is needed for the REML log-likelihood calculation.
     pub fn log_determinant(&self) -> f64 {
-        // The log-determinant of A = L*L^T is 2 * sum(log(L_ii)).
-        // We need to extract the diagonal of L from the factored values.
-        //
-        // The storage format depends on whether the factorization is simplicial
-        // or supernodal.
+        let (col_ptrs, _) = self.factor_structure();
+        // In the simplicial factor the diagonal entry L(i,i) is the first
+        // entry of column i.
+        let mut log_det = 0.0;
+        for i in 0..self.dim {
+            log_det += self.l_values[col_ptrs[i].zx()].ln();
+        }
+        2.0 * log_det
+    }
+
+    /// Column pointers and (sorted) row indices of the simplicial factor `L`
+    /// in the permuted ordering; the values in `self.l_values` are stored in
+    /// the same order.
+    fn factor_structure(&self) -> (&[usize], &[usize]) {
         match self.symbolic.raw() {
-            SymbolicCholeskyRaw::Simplicial(sym_simpl) => {
-                // In the simplicial case, L is stored in CSC format.
-                // The diagonal entry L(i,i) is the first entry in column i.
-                let col_ptrs = sym_simpl.col_ptrs();
-                let mut log_det = 0.0;
-                for i in 0..self.dim {
-                    let col_start = col_ptrs[i].zx(); // .zx() converts index to usize
-                    let diag_val = self.l_values[col_start];
-                    log_det += diag_val.ln();
-                }
-                2.0 * log_det
-            }
-            SymbolicCholeskyRaw::Supernodal(_sym_super) => {
-                // For the supernodal case, we compute the log-determinant by
-                // solving with the identity. log|A| = -log|A^{-1}|, but that's
-                // expensive. Instead, we use the fact that for SPD matrices,
-                // we can use L*x = e_i to extract diagonal elements.
-                //
-                // A simpler approach: solve I and compute from the diagonal of
-                // A^{-1}, but that defeats the purpose.
-                //
-                // For the supernodal case, the L factor stores dense diagonal
-                // blocks. We iterate over supernodes and extract diagonals.
-                //
-                // The supernodal L stores data in dense blocks. Each supernode
-                // contains a dense lower-triangular diagonal block followed by
-                // a dense rectangular sub-diagonal block. The diagonal entries
-                // of L are the diagonal entries of these diagonal blocks.
-                //
-                // For now, use the solve approach: solve L*z = I column by column
-                // is too expensive. Instead, we note that for the supernodal case
-                // the values are stored as dense blocks, so we access them directly.
-                self.log_determinant_via_solve()
+            SymbolicCholeskyRaw::Simplicial(s) => (s.col_ptrs(), s.row_indices()),
+            SymbolicCholeskyRaw::Supernodal(_) => {
+                unreachable!("the solver always requests a simplicial factorization")
             }
         }
     }
 
-    /// Fallback log-determinant computation via solving.
+    /// Fill-reducing permutation as `(forward, inverse)`: the factorized
+    /// matrix is `B = P A P'` with `B[inv[i], inv[j]] = A[i, j]`, i.e.
+    /// `A[fwd[r], fwd[c]] = B[r, c]`.
+    fn permutation(&self) -> (Vec<usize>, Vec<usize>) {
+        match self.symbolic.perm() {
+            Some(perm) => {
+                let (fwd, inv) = perm.arrays();
+                (
+                    fwd.iter().map(|i| i.zx()).collect(),
+                    inv.iter().map(|i| i.zx()).collect(),
+                )
+            }
+            None => ((0..self.dim).collect(), (0..self.dim).collect()),
+        }
+    }
+
+    /// Selected entries of `A⁻¹` via the Takahashi recurrences.
     ///
-    /// Computes log|A| by using the identity: A = L*L^T, so log|A| = 2*sum(log(diag(L))).
-    /// When direct diagonal extraction is not straightforward (supernodal case),
-    /// we compute det(A) column-by-column from the triangular solve.
+    /// Returns a symmetric sparse matrix (both triangles stored, CSC with
+    /// sorted indices, original ordering) holding `A⁻¹` at every position
+    /// in the pattern of `L + L'`. That pattern contains the pattern of `A`,
+    /// so `tr(A⁻¹ B)` for any `B` with the pattern of `A` (or a sub-pattern,
+    /// e.g. a relationship-matrix inverse block) and the diagonal of `A⁻¹`
+    /// are exact. Entries outside the pattern are *not* zero in `A⁻¹`; they
+    /// are simply not stored.
     ///
-    /// Actually, we can still get log-det from L^{-1} * e_i but this is O(n^2).
-    /// For practical mixed model sizes (up to ~50k), this is still feasible.
-    fn log_determinant_via_solve(&self) -> f64 {
-        // Solve L * X = I to get L^{-1}. The diagonal of L^{-1} gives us
-        // 1/L_ii, so log|A| = 2 * sum(log(L_ii)) = -2 * sum(log((L^{-1})_ii)).
-        //
-        // However, this is O(n^2) in memory and O(n^2 * nnz_per_col) in time.
-        // For large problems, this should be avoided.
-        //
-        // A better approach: use the LLT ref to solve e_i one at a time
-        // and only look at the i-th component.
-        //
-        // But actually for the L*L^T solve, faer applies L^{-1} then L^{-T}.
-        // We need just L^{-1} * e_i for each i. For now, we'll use the full
-        // solve and extract.
-        //
-        // TODO: When supernodal, implement direct diagonal extraction.
+    /// Cost is `Σ_j |L_{:,j}|²` operations, i.e. proportional to the work of
+    /// the factorization itself.
+    pub fn inverse_subset(&self) -> SparseMat {
         let n = self.dim;
-        let llt = LltRef::<'_, usize, f64>::new(&self.symbolic, &self.l_values);
+        let (col_ptrs, row_ind) = self.factor_structure();
+        let l = &self.l_values;
+        // Z holds the inverse entries in the storage layout of L (lower
+        // triangle including the diagonal, permuted ordering).
+        let mut z = vec![0.0f64; l.len()];
 
-        let req = self.symbolic.solve_in_place_req::<f64>(n).unwrap();
-        let mut mem = GlobalPodBuffer::new(req);
-
-        // Create identity matrix column-major
-        let mut identity_data = vec![0.0f64; n * n];
-        for i in 0..n {
-            identity_data[i * n + i] = 1.0;
+        // For column j with below-diagonal pattern P_j (sorted):
+        //   Z_ij = −(1/L_jj) Σ_{k∈P_j} L_kj Z(k,i)      for i ∈ P_j
+        //   Z_jj = (1/L_jj) (1/L_jj − Σ_{k∈P_j} L_kj Z_kj)
+        // Every Z(k,i) with i, k ∈ P_j lies in a column > j (already
+        // computed) and, by the closure property of the Cholesky pattern,
+        // is stored in column min(i,k) at row max(i,k). Walking column k of
+        // Z against P_j (both sorted) therefore yields all pairs without
+        // any searching; each unordered pair contributes to both sums.
+        let mut acc: Vec<f64> = Vec::new();
+        for j in (0..n).rev() {
+            let start = col_ptrs[j];
+            let end = col_ptrs[j + 1];
+            let ljj = l[start];
+            let pj = &row_ind[start + 1..end];
+            let lj = &l[start + 1..end];
+            acc.clear();
+            acc.resize(pj.len(), 0.0);
+            for (b, &k) in pj.iter().enumerate() {
+                let ks = col_ptrs[k];
+                let ke = col_ptrs[k + 1];
+                let rows_k = &row_ind[ks..ke];
+                let z_k = &z[ks..ke];
+                let (mut a, mut c) = (b, 0);
+                while a < pj.len() && c < rows_k.len() {
+                    let i = pj[a];
+                    let r = rows_k[c];
+                    if i == r {
+                        let v = z_k[c]; // Z(i,k) = Z(k,i)
+                        acc[a] += lj[b] * v;
+                        if a != b {
+                            acc[b] += lj[a] * v;
+                        }
+                        a += 1;
+                        c += 1;
+                    } else if i < r {
+                        a += 1;
+                    } else {
+                        c += 1;
+                    }
+                }
+            }
+            for (a, sum) in acc.iter().enumerate() {
+                z[start + 1 + a] = -sum / ljj;
+            }
+            let mut sum = 0.0;
+            for a in 0..pj.len() {
+                sum += lj[a] * z[start + 1 + a];
+            }
+            z[start] = (1.0 / ljj - sum) / ljj;
         }
 
-        let identity_mat = faer::mat::from_column_major_slice_mut(&mut identity_data, n, n);
+        // Map back to the original ordering and symmetrise.
+        let (fwd, _) = self.permutation();
+        let mut tri = TriMat::with_capacity((n, n), 2 * l.len());
+        for c in 0..n {
+            for a in col_ptrs[c]..col_ptrs[c + 1] {
+                let r = row_ind[a];
+                let (oi, oj) = (fwd[r], fwd[c]);
+                tri.add_triplet(oi, oj, z[a]);
+                if r != c {
+                    tri.add_triplet(oj, oi, z[a]);
+                }
+            }
+        }
+        tri.to_csc()
+    }
 
-        // Solve A * X = I  =>  X = A^{-1}
-        llt.solve_in_place_with_conj(
-            faer::Conj::No,
-            identity_mat,
-            Parallelism::None,
-            PodStack::new(&mut mem),
-        );
-
-        // log|A| = -log|A^{-1}| = -sum(log(diag(A^{-1})))
-        // Wait, that's not right. |A^{-1}| = 1/|A|, so log|A^{-1}| = -log|A|.
-        // And A^{-1} is SPD, so its determinant is the product of eigenvalues.
-        //
-        // Actually, we should use: log|A| = -trace(log(A^{-1})) only if A^{-1}
-        // has specific structure. The correct formula is:
-        //
-        //   log|A| = -log|A^{-1}|
-        //
-        // But we can't easily compute |A^{-1}| from the dense inverse without
-        // another factorization. So this approach doesn't work efficiently.
-        //
-        // Instead, let's just solve L * z = e_i for each i and compute
-        // prod(z_i[i]) = det(L^{-1}). Then log|L| = -sum(log(z_i[i])).
-        //
-        // Actually, the simplest approach for small matrices: do a dense Cholesky
-        // on the diagonal to get log-det. But we already have L.
-        //
-        // For the supernodal case, let's just reconstruct L as a sparse matrix
-        // and read its diagonal. The L factor symbolic gives us column pointers.
-        //
-        // After more thought: for ANY case (simplicial or supernodal), the
-        // `LltRef` wraps a `SymbolicCholesky` + values slice. For the simplicial
-        // case, values are in CSC order matching the symbolic col_ptrs/row_indices.
-        // For the supernodal case, values are stored in dense supernodal blocks.
-        //
-        // For now, return 0.0 and log a warning. In practice, for small-to-medium
-        // mixed models (which use supernodal only for large problems), the
-        // simplicial path will be taken. We can add supernodal diagonal extraction
-        // later.
-        log::warn!(
-            "SparseCholeskySolver: log_determinant for supernodal factorization \
-             is not yet implemented efficiently. Returning 0.0."
-        );
-        0.0
+    /// Diagonal of `A⁻¹` (original ordering), from [`inverse_subset`](Self::inverse_subset).
+    pub fn inverse_diagonal(&self) -> Vec<f64> {
+        let z = self.inverse_subset();
+        (0..self.dim)
+            .map(|i| z.get(i, i).copied().unwrap_or(0.0))
+            .collect()
     }
 
     /// Compute the full inverse A^{-1} (dense).
@@ -376,6 +402,12 @@ impl SparseCholeskySolver {
     /// Returns the dimension of the system.
     pub fn dim(&self) -> usize {
         self.dim
+    }
+
+    /// Number of stored entries of the Cholesky factor `L` (including the
+    /// diagonal); a measure of the fill-in produced by the ordering.
+    pub fn factor_nnz(&self) -> usize {
+        self.l_values.len()
     }
 }
 
@@ -572,6 +604,78 @@ mod tests {
 
         let result = SparseCholeskySolver::new(&mat);
         assert!(result.is_err(), "Should fail for non-SPD matrix");
+    }
+
+    /// Random-ish SPD matrix with an irregular pattern (a banded part plus a
+    /// dense row/column) so that the AMD ordering is non-trivial.
+    fn irregular_spd(n: usize) -> SparseMat {
+        let mut tri = TriMat::new((n, n));
+        for i in 0..n {
+            tri.add_triplet(i, i, 10.0 + (i % 7) as f64);
+            if i + 1 < n {
+                let v = -1.0 - ((i * 13) % 5) as f64 * 0.3;
+                tri.add_triplet(i, i + 1, v);
+                tri.add_triplet(i + 1, i, v);
+            }
+            if i + 3 < n && i % 2 == 0 {
+                tri.add_triplet(i, i + 3, 0.5);
+                tri.add_triplet(i + 3, i, 0.5);
+            }
+            if i > 0 {
+                // dense first row/column
+                tri.add_triplet(0, i, 0.2);
+                tri.add_triplet(i, 0, 0.2);
+            }
+        }
+        tri.to_csc()
+    }
+
+    fn dense_inverse(a: &SparseMat) -> nalgebra::DMatrix<f64> {
+        let n = a.rows();
+        let mut d = nalgebra::DMatrix::zeros(n, n);
+        for (v, (i, j)) in a.iter() {
+            d[(i, j)] = *v;
+        }
+        d.try_inverse().unwrap()
+    }
+
+    #[test]
+    fn inverse_subset_matches_dense_inverse_on_pattern() {
+        let n = 40;
+        let a = irregular_spd(n);
+        let solver = SparseCholeskySolver::new(&a).unwrap();
+        let z = solver.inverse_subset();
+        let a_inv = dense_inverse(&a);
+
+        // Every stored entry equals the dense inverse (this also pins down
+        // the permutation convention).
+        let mut n_checked = 0;
+        for (v, (i, j)) in z.iter() {
+            assert!(
+                (v - a_inv[(i, j)]).abs() < 1e-9,
+                "Z[{i},{j}] = {v}, dense = {}",
+                a_inv[(i, j)]
+            );
+            n_checked += 1;
+        }
+        assert!(n_checked >= n);
+        // Every nonzero of A is covered by the subset.
+        for (_, (i, j)) in a.iter() {
+            assert!(z.get(i, j).is_some(), "A[{i},{j}] not in the subset");
+        }
+        // Diagonal helper
+        let diag = solver.inverse_diagonal();
+        for i in 0..n {
+            assert!((diag[i] - a_inv[(i, i)]).abs() < 1e-9);
+        }
+        // log-determinant against a dense Cholesky
+        let mut d = nalgebra::DMatrix::zeros(n, n);
+        for (v, (i, j)) in a.iter() {
+            d[(i, j)] = *v;
+        }
+        let l = d.cholesky().unwrap();
+        let expected: f64 = 2.0 * (0..n).map(|i| l.l()[(i, i)].ln()).sum::<f64>();
+        assert!((solver.log_determinant() - expected).abs() < 1e-8);
     }
 
     #[test]

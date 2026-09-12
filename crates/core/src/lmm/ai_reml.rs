@@ -1,8 +1,10 @@
-use crate::error::{LmmError, Result};
+use crate::diagnostics::fixed_cov_derivatives_scaled_identity;
+use crate::error::Result;
 use crate::matrix::sparse::spmv;
 use crate::model::MixedModel;
+use crate::types::SparseMat;
 
-use super::mme::MixedModelEquations;
+use super::mme::{MmeInverse, SparseMixedModelEquations};
 use super::result::{FitResult, NamedEffect, RandomEffectBlock, RemlIteration, VarianceEstimate};
 
 /// REML engine using the Average Information algorithm (Gilmour, Thompson &
@@ -157,10 +159,7 @@ impl AiReml {
             }
             let (mme, sol, logl) = current.expect("MME solved at accepted parameters");
 
-            let c_inv = sol
-                .c_inv
-                .as_ref()
-                .ok_or(LmmError::CholeskyFailed("C^{-1} not available".into()))?;
+            let c_inv = sol.inverse()?;
             let n_fixed = mme.n_fixed;
             let residuals = self.residuals(model, &sol);
 
@@ -266,9 +265,7 @@ impl AiReml {
 
         // ---- final solve with converged parameters ----
         let (mme, sol) = self.solve_at(model, &sigma2_random, sigma2_e)?;
-        let c_inv = sol.c_inv.as_ref().ok_or(LmmError::CholeskyFailed(
-            "C^{-1} not available for SE computation".into(),
-        ))?;
+        let c_inv = sol.inverse()?;
         let residuals = self.residuals(model, &sol);
 
         let mut var_params: Vec<f64> = sigma2_random.clone();
@@ -295,7 +292,7 @@ impl AiReml {
                 &sigma2_random,
                 sigma2_e,
                 &residuals,
-            );
+            )?;
             if let Some(chol) = ai.clone().cholesky() {
                 let ai_inv = chol.inverse();
                 for (i, se) in variance_se.iter_mut().enumerate() {
@@ -316,6 +313,25 @@ impl AiReml {
             converged,
         )?;
         result.ai_matrix = ai_matrix;
+        if result.ai_matrix.is_some() {
+            // Derivatives of the fixed-effects covariance for Satterthwaite df.
+            let kinv: Vec<Option<&SparseMat>> =
+                model.ginv_matrices.iter().map(|g| g.as_ref()).collect();
+            result.fixed_cov_derivatives = fixed_cov_derivatives_scaled_identity(
+                c_inv,
+                &model.x,
+                &model.z_blocks,
+                &kinv,
+                &var_params,
+            )
+            .iter()
+            .map(|m| {
+                (0..m.nrows())
+                    .map(|i| (0..m.ncols()).map(|j| m[(i, j)]).collect())
+                    .collect()
+            })
+            .collect();
+        }
         Ok(result)
     }
 
@@ -325,7 +341,7 @@ impl AiReml {
         model: &mut MixedModel,
         sigma2_random: &[f64],
         sigma2_e: f64,
-    ) -> Result<(MixedModelEquations, super::mme::MmeSolution)> {
+    ) -> Result<(SparseMixedModelEquations, super::mme::MmeSolution)> {
         for (k, vs) in model.random_var_structs.iter_mut().enumerate() {
             vs.set_params(&[sigma2_random[k]])?;
         }
@@ -342,7 +358,7 @@ impl AiReml {
             })
             .collect();
 
-        let mme = MixedModelEquations::assemble(
+        let mme = SparseMixedModelEquations::assemble(
             &model.x,
             &model.z_blocks,
             &model.y,
@@ -357,7 +373,7 @@ impl AiReml {
     fn log_likelihood(
         &self,
         model: &MixedModel,
-        mme: &MixedModelEquations,
+        mme: &SparseMixedModelEquations,
         sol: &super::mme::MmeSolution,
         sigma2_random: &[f64],
         sigma2_e: f64,
@@ -407,7 +423,7 @@ impl AiReml {
         &self,
         model: &MixedModel,
         sol: &super::mme::MmeSolution,
-        c_inv: &nalgebra::DMatrix<f64>,
+        c_inv: &MmeInverse,
         n_fixed: usize,
     ) -> Vec<(f64, f64)> {
         let mut out = Vec::with_capacity(model.z_blocks.len());
@@ -424,15 +440,12 @@ impl AiReml {
                     .map(|(a, b)| a * b)
                     .sum::<f64>();
                 // tr(K^{-1} C^{uu}) = sum_{ij} K^{-1}_{ij} C^{uu}_{ji}; K^{-1} is sparse.
-                let mut tr = 0.0;
-                for (val, (i, j)) in ginv_k.iter() {
-                    tr += val * c_inv[(block_start + j, block_start + i)];
-                }
+                let tr = c_inv.trace_block(ginv_k, block_start);
                 (uq, tr)
             } else {
                 let uq = u_k.iter().map(|u| u * u).sum::<f64>();
-                let tr = (0..q_k)
-                    .map(|i| c_inv[(block_start + i, block_start + i)])
+                let tr = sol.c_inv_diag[block_start..block_start + q_k]
+                    .iter()
                     .sum::<f64>();
                 (uq, tr)
             };
@@ -447,7 +460,7 @@ impl AiReml {
         &self,
         model: &MixedModel,
         sol: &super::mme::MmeSolution,
-        c_inv: &nalgebra::DMatrix<f64>,
+        c_inv: &MmeInverse,
         n_fixed: usize,
         n: usize,
         sigma2_random: &mut [f64],
@@ -535,15 +548,15 @@ impl AiReml {
         &self,
         model: &MixedModel,
         sol: &super::mme::MmeSolution,
-        c_inv: &nalgebra::DMatrix<f64>,
+        c_inv: &MmeInverse,
         n_fixed: usize,
         sigma2_random: &[f64],
         sigma2_e: f64,
         residuals: &[f64],
-    ) -> nalgebra::DMatrix<f64> {
+    ) -> Result<nalgebra::DMatrix<f64>> {
         let n_random_terms = sigma2_random.len();
         let n_params = n_random_terms + 1;
-        let dim = c_inv.nrows();
+        let dim = c_inv.dim();
 
         // Working variates w_i (length n).
         let mut w: Vec<Vec<f64>> = Vec::with_capacity(n_params);
@@ -573,7 +586,7 @@ impl AiReml {
                 }
                 offset += z.cols();
             }
-            c_inv_t.push(c_inv * &ti);
+            c_inv_t.push(nalgebra::DVector::from_vec(c_inv.apply(ti.as_slice())?));
             t.push(ti);
         }
 
@@ -588,7 +601,7 @@ impl AiReml {
                 ai[(j, i)] = value;
             }
         }
-        ai
+        Ok(ai)
     }
 
     /// AI-REML Newton-Raphson update over the free (non-boundary) parameters.
@@ -601,7 +614,7 @@ impl AiReml {
         &self,
         model: &MixedModel,
         sol: &super::mme::MmeSolution,
-        c_inv: &nalgebra::DMatrix<f64>,
+        c_inv: &MmeInverse,
         n_fixed: usize,
         n: usize,
         sigma2_random: &[f64],
@@ -627,15 +640,17 @@ impl AiReml {
             residuals,
             &quad_trace,
         );
-        let ai = self.average_information(
-            model,
-            sol,
-            c_inv,
-            n_fixed,
-            sigma2_random,
-            sigma2_e,
-            residuals,
-        );
+        let ai = self
+            .average_information(
+                model,
+                sol,
+                c_inv,
+                n_fixed,
+                sigma2_random,
+                sigma2_e,
+                residuals,
+            )
+            .ok()?;
 
         // ---- Newton step over the free parameters: delta = AI^{-1} * score ----
         let m = free.len();
@@ -686,7 +701,7 @@ impl AiReml {
         &self,
         model: &MixedModel,
         sol: &super::mme::MmeSolution,
-        mme: &MixedModelEquations,
+        mme: &SparseMixedModelEquations,
         var_params: &[f64],
         variance_se: &[f64],
         at_boundary: &[bool],
@@ -739,9 +754,10 @@ impl AiReml {
         });
 
         // Fixed effects with SEs from C^{-1}
-        let c_inv = sol.c_inv.as_ref().unwrap();
+        let c_inv = sol.inverse()?;
+        let fixed_block = c_inv.fixed_block(n_fixed);
         let fixed_cov: Vec<Vec<f64>> = (0..n_fixed)
-            .map(|i| (0..n_fixed).map(|j| c_inv[(i, j)]).collect())
+            .map(|i| (0..n_fixed).map(|j| fixed_block[(i, j)]).collect())
             .collect();
         let fixed_effects: Vec<NamedEffect> = model
             .fixed_labels
@@ -751,7 +767,7 @@ impl AiReml {
                 term: label.term.clone(),
                 level: label.level.clone(),
                 estimate: sol.fixed_effects[i],
-                se: c_inv[(i, i)].sqrt(),
+                se: sol.c_inv_diag[i].sqrt(),
             })
             .collect();
 
@@ -766,7 +782,7 @@ impl AiReml {
                     term: model.random_term_names[k].clone(),
                     level: level_name.clone(),
                     estimate: sol.random_effects[k][j],
-                    se: c_inv[(block_offset + j, block_offset + j)].sqrt(),
+                    se: sol.c_inv_diag[block_offset + j].sqrt(),
                 })
                 .collect();
             random_effects.push(RandomEffectBlock {
@@ -813,6 +829,7 @@ impl AiReml {
             c_inv: sol.c_inv.clone(),
             ai_matrix: None,
             n_random_per_term: model.z_blocks.iter().map(|z| z.cols()).collect(),
+            fixed_cov_derivatives: Vec::new(),
         })
     }
 }
@@ -1041,15 +1058,17 @@ mod tests {
         let c_inv = sol.c_inv.as_ref().unwrap();
         let residuals = solver.residuals(&model, &sol);
 
-        let ai = solver.average_information(
-            &model,
-            &sol,
-            c_inv,
-            mme.n_fixed,
-            &sigma2_random,
-            sigma2_e,
-            &residuals,
-        );
+        let ai = solver
+            .average_information(
+                &model,
+                &sol,
+                c_inv,
+                mme.n_fixed,
+                &sigma2_random,
+                sigma2_e,
+                &residuals,
+            )
+            .unwrap();
         assert_relative_eq!(ai[(0, 1)], ai[(1, 0)], epsilon = 1e-10);
         assert!(
             ai[(0, 0)] > 0.0 && ai[(1, 1)] > 0.0,

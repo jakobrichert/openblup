@@ -552,7 +552,8 @@ impl GeneralReml {
             .sol
             .c_inv
             .as_ref()
-            .expect("dense C^-1 is always computed by the MME solve");
+            .and_then(|c| c.as_dense())
+            .expect("dense C^-1 is always computed by the dense MME solve");
         let n_fixed = ev.mme.n_fixed;
         let dim = c_inv.nrows();
 
@@ -627,6 +628,60 @@ impl GeneralReml {
         (score, ai)
     }
 
+    /// `∂Φ/∂θ = −F' (∂C/∂θ) F` for every variance parameter, with
+    /// `F = C⁻¹_{·b}` the fixed-effect columns of `C⁻¹`: for a parameter of
+    /// random term `k`, `∂C/∂θ = Ḡ` in block `kk`; for a residual parameter,
+    /// `∂C/∂θ = −(R⁻¹W)' (∂R/∂θ) (R⁻¹W)`. Used for Satterthwaite df.
+    fn fixed_cov_derivatives(
+        &self,
+        model: &MixedModel,
+        ev: &Evaluation,
+        layout: &ParamLayout,
+    ) -> Vec<Vec<Vec<f64>>> {
+        let c_inv = match ev.sol.c_inv.as_ref().and_then(|c| c.as_dense()) {
+            Some(c) => c,
+            None => return Vec::new(),
+        };
+        let n_fixed = ev.mme.n_fixed;
+        let dim = c_inv.nrows();
+        let f = c_inv.columns(0, n_fixed).into_owned();
+        let mut out = vec![DMatrix::zeros(n_fixed, n_fixed); layout.total];
+
+        let mut offset = n_fixed;
+        for (k, vs) in model.random_var_structs.iter().enumerate() {
+            let q = model.z_blocks[k].cols();
+            let f_k = f.rows(offset, q).into_owned();
+            for (i, gbar) in vs.derivatives_of_inverse(q).iter().enumerate() {
+                let mut gbar_f = DMatrix::zeros(q, n_fixed);
+                for (v, (a, b)) in gbar.iter() {
+                    for j in 0..n_fixed {
+                        gbar_f[(a, j)] += v * f_k[(b, j)];
+                    }
+                }
+                out[layout.term_ranges[k].start + i] = -(f_k.transpose() * gbar_f);
+            }
+            offset += q;
+        }
+
+        let n_res = ev.residual.n_params();
+        if n_res > 0 {
+            let w_dense = dense_design(model, dim);
+            let rinv_w = ev.residual.apply_inv_mat(&w_dense);
+            for i in 0..n_res {
+                let m = ev.residual.m_matrix(i, &rinv_w);
+                out[layout.residual_range.start + i] = f.transpose() * (&m * &f);
+            }
+        }
+
+        out.iter()
+            .map(|m| {
+                (0..n_fixed)
+                    .map(|i| (0..n_fixed).map(|j| m[(i, j)]).collect())
+                    .collect()
+            })
+            .collect()
+    }
+
     fn build_result(
         &self,
         model: &MixedModel,
@@ -640,7 +695,12 @@ impl GeneralReml {
     ) -> Result<FitResult> {
         let n = model.n_obs;
         let n_fixed = ev.mme.n_fixed;
-        let c_inv = ev.sol.c_inv.as_ref().unwrap();
+        let c_inv = ev
+            .sol
+            .c_inv
+            .as_ref()
+            .and_then(|c| c.as_dense())
+            .expect("dense C^-1 is always computed by the dense MME solve");
 
         let mut variance_components = Vec::new();
         for (k, vs) in model.random_var_structs.iter().enumerate() {
@@ -722,6 +782,7 @@ impl GeneralReml {
             n_fixed_params: n_fixed,
             n_variance_params: layout.total,
             c_inv: ev.sol.c_inv.clone(),
+            fixed_cov_derivatives: self.fixed_cov_derivatives(model, ev, layout),
             ai_matrix: None,
             n_random_per_term: model.z_blocks.iter().map(|z| z.cols()).collect(),
         })

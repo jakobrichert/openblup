@@ -1,5 +1,9 @@
 use nalgebra::DMatrix;
 
+use crate::lmm::MmeInverse;
+use crate::matrix::sparse::spmv;
+use crate::types::SparseMat;
+
 use crate::lmm::FitResult;
 
 use super::wald::{f_distribution_sf, WaldTest};
@@ -16,50 +20,35 @@ pub enum DdfMethod {
     Satterthwaite,
 }
 
-/// Calculator for denominator degrees of freedom (ddf) using the
-/// Satterthwaite or Kenward-Roger approximation.
+/// Satterthwaite denominator degrees of freedom for Wald tests of fixed
+/// effects (Giesbrecht & Burns 1985; Fai & Cornelius 1996 for multi-df
+/// terms).
 ///
-/// For a single contrast `l'beta`, the Satterthwaite df is:
+/// The calculator works from
 ///
-/// ```text
-/// nu = 2 * (l' Phi l)^2 / sum_{i,j} (l' dPhi/dtheta_i l) * AI_inv_{ij} * (l' dPhi/dtheta_j l)
-/// ```
+/// * `Φ = C⁻¹_{bb}`, the covariance matrix of the fixed effects,
+/// * `∂Φ/∂θ_k` for every variance parameter `θ_k`, and
+/// * the inverse of the average information matrix, `AI⁻¹ ≈ Var(θ̂)`.
 ///
-/// where `Phi = C^{-1}_{bb}` is the fixed-effects block of `C^{-1}`,
-/// `AI` is the Average Information matrix at convergence, and
-/// `dPhi/dtheta_k` is the derivative of `Phi` with respect to variance
-/// parameter `theta_k`.
+/// For a contrast `l'β`, `ν = 2 (l'Φl)² / (g' AI⁻¹ g)` with
+/// `g_k = l' (∂Φ/∂θ_k) l`. The derivatives are
+/// `∂Φ/∂θ_k = −C⁻¹_{b·} (∂C/∂θ_k) C⁻¹_{·b}`; the REML engines compute them
+/// at convergence from the columns of `C⁻¹` belonging to the fixed effects,
+/// so no dense `C⁻¹` is needed (see
+/// [`fixed_cov_derivatives_scaled_identity`]).
 ///
-/// The derivatives are computed analytically using the matrix identity:
-/// `dC^{-1}/dtheta_k = -C^{-1} * (dC/dtheta_k) * C^{-1}`
-///
-/// # Kenward-Roger (future)
-///
-/// The full Kenward-Roger adjustment includes two additional corrections
-/// beyond the Satterthwaite ddf:
-///
-/// 1. **Bias adjustment**: `Phi_A = Phi + 2*Lambda` where `Lambda` corrects
-///    for small-sample bias in the variance-covariance matrix of fixed effects.
-///
-/// 2. **Scaled F-statistic**: `F* = (q/q*) * F` where `q*` adjusts the scale
-///    of the F distribution.
-///
-/// These require the full `dC/dtheta` derivatives which are available in this
-/// implementation, but the KR-specific corrections are not yet implemented.
-/// The Satterthwaite ddf is the primary method provided here.
+/// Kenward-Roger's small-sample bias adjustment of `Φ` is not implemented.
 pub struct DdfCalculator {
-    /// Full C^{-1} matrix from the converged MME.
-    c_inv: DMatrix<f64>,
+    /// `Φ = C⁻¹_{bb}` (p x p).
+    phi: DMatrix<f64>,
+    /// `∂Φ/∂θ_k`, one p x p matrix per variance parameter.
+    dphi: Vec<DMatrix<f64>>,
     /// Inverse of the Average Information matrix (n_vc x n_vc).
     ai_inv: DMatrix<f64>,
     /// Number of fixed effect parameters (p).
     n_fixed: usize,
     /// Number of observations.
     n_obs: usize,
-    /// Number of random effect levels per random term.
-    n_random_per_term: Vec<usize>,
-    /// Current variance parameters: [sigma2_1, ..., sigma2_r, sigma2_e].
-    variance_params: Vec<f64>,
 }
 
 impl DdfCalculator {
@@ -67,141 +56,43 @@ impl DdfCalculator {
     ///
     /// # Arguments
     ///
-    /// * `c_inv` - Full inverse of the MME coefficient matrix at convergence.
-    /// * `ai_matrix` - The Average Information matrix (n_vc x n_vc) at convergence.
-    /// * `n_fixed` - Number of fixed effect parameters (p).
+    /// * `phi` - Covariance matrix of the fixed effects (p x p).
+    /// * `dphi` - `∂Φ/∂θ_k` for each variance parameter (p x p each).
+    /// * `ai_matrix` - The Average Information matrix at convergence.
     /// * `n_obs` - Number of observations.
-    /// * `n_random_per_term` - Number of random effect levels for each random term.
-    /// * `variance_params` - Current variance parameters [sigma2_1, ..., sigma2_r, sigma2_e].
     ///
     /// # Returns
     ///
-    /// `None` if the AI matrix is not invertible.
+    /// `None` if the AI matrix is not positive definite or the number of
+    /// derivatives does not match its dimension.
     pub fn new(
-        c_inv: DMatrix<f64>,
+        phi: DMatrix<f64>,
+        dphi: Vec<DMatrix<f64>>,
         ai_matrix: DMatrix<f64>,
-        n_fixed: usize,
         n_obs: usize,
-        n_random_per_term: Vec<usize>,
-        variance_params: Vec<f64>,
     ) -> Option<Self> {
-        // Invert the AI matrix
-        let ai_inv = ai_matrix.clone().cholesky()?.inverse();
-
+        let n_fixed = phi.nrows();
+        if phi.ncols() != n_fixed
+            || dphi.len() != ai_matrix.nrows()
+            || dphi
+                .iter()
+                .any(|d| d.nrows() != n_fixed || d.ncols() != n_fixed)
+        {
+            return None;
+        }
+        let ai_inv = ai_matrix.cholesky()?.inverse();
         Some(Self {
-            c_inv,
+            phi,
+            dphi,
             ai_inv,
             n_fixed,
             n_obs,
-            n_random_per_term,
-            variance_params,
         })
     }
 
-    /// Extract the fixed-effects block of C^{-1}, i.e. `Phi = C^{-1}_{bb}` (p x p).
-    fn phi(&self) -> DMatrix<f64> {
-        self.c_inv.view((0, 0), (self.n_fixed, self.n_fixed)).into()
-    }
-
-    /// Compute the derivative `dC/dtheta_k` for variance parameter k.
-    ///
-    /// The MME coefficient matrix is:
-    /// ```text
-    /// C = [ X'R^{-1}X       X'R^{-1}Z           ]
-    ///     [ Z'R^{-1}X       Z'R^{-1}Z + G^{-1}  ]
-    /// ```
-    ///
-    /// For R = sigma2_e * I and G_k = sigma2_k * I_qk:
-    ///
-    /// - `dC/d(sigma2_k)` for random term k:
-    ///   Only the G^{-1}_k block changes: `d(G_k^{-1})/d(sigma2_k) = -1/sigma2_k^2 * I_qk`
-    ///   So `dC/d(sigma2_k)` is zero everywhere except the (k,k) random block
-    ///   on the diagonal, where it equals `-1/sigma2_k^2 * I_qk`.
-    ///
-    /// - `dC/d(sigma2_e)`:
-    ///   `R^{-1} = 1/sigma2_e * I`, so `dR^{-1}/d(sigma2_e) = -1/sigma2_e^2 * I`.
-    ///   This scales all the `R^{-1}`-containing terms by the factor `-1/sigma2_e`.
-    ///   So `dC/d(sigma2_e) = -1/sigma2_e * W'R^{-1}W` where `W = [X Z]`.
-    ///   The G^{-1} blocks do NOT depend on sigma2_e.
-    fn dc_dtheta(&self, k: usize) -> DMatrix<f64> {
-        let dim = self.c_inv.nrows();
-        let n_random_terms = self.n_random_per_term.len();
-        let sigma2_e = self.variance_params[n_random_terms];
-
-        if k < n_random_terms {
-            // Derivative w.r.t. sigma2_k (random term k)
-            // dC/d(sigma2_k) = -1/sigma2_k^2 * I in the (k,k) random block
-            let sigma2_k = self.variance_params[k];
-            let mut dc = DMatrix::zeros(dim, dim);
-            let block_start = self.n_fixed + self.n_random_per_term[..k].iter().sum::<usize>();
-            let q_k = self.n_random_per_term[k];
-            let scale = -1.0 / (sigma2_k * sigma2_k);
-            for i in 0..q_k {
-                dc[(block_start + i, block_start + i)] = scale;
-            }
-            dc
-        } else {
-            // Derivative w.r.t. sigma2_e (residual)
-            // dC/d(sigma2_e) = -1/sigma2_e * (C - block_diag(0, G^{-1}))
-            // Because C = (1/sigma2_e)*W'W + block_diag(0, G^{-1}_1, ..., G^{-1}_r)
-            // so dC/d(sigma2_e) = -1/sigma2_e^2 * W'W = -1/sigma2_e * (C - block_diag(0, G^{-1}))
-
-            // Reconstruct C from C^{-1}
-            let c_matrix = match self.c_inv.clone().try_inverse() {
-                Some(c) => c,
-                None => return DMatrix::zeros(dim, dim),
-            };
-
-            // Build the G^{-1} block diagonal to subtract
-            let mut ginv_contribution = DMatrix::zeros(dim, dim);
-            let mut block_start = self.n_fixed;
-            for kk in 0..n_random_terms {
-                let q_k = self.n_random_per_term[kk];
-                let sigma2_k = self.variance_params[kk];
-                // G_k^{-1} = (1/sigma2_k) * I_qk (identity structure)
-                for i in 0..q_k {
-                    ginv_contribution[(block_start + i, block_start + i)] = 1.0 / sigma2_k;
-                }
-                block_start += q_k;
-            }
-
-            // W'R^{-1}W = C - block_diag(0, G^{-1})
-            let wtrw = &c_matrix - &ginv_contribution;
-            -1.0 / sigma2_e * wtrw
-        }
-    }
-
-    /// Compute `dPhi/dtheta_k` where `Phi = C^{-1}_{bb}` (the p x p fixed-effects block).
-    ///
-    /// Using the matrix identity:
-    /// `dC^{-1}/dtheta_k = -C^{-1} * (dC/dtheta_k) * C^{-1}`
-    ///
-    /// Then `dPhi/dtheta_k` is the top-left p x p block of `dC^{-1}/dtheta_k`.
-    fn dphi_dtheta(&self, k: usize) -> DMatrix<f64> {
-        let dc = self.dc_dtheta(k);
-        let p = self.n_fixed;
-        let dim = self.c_inv.nrows();
-
-        // dC^{-1}/dtheta_k = -C^{-1} * dC/dtheta_k * C^{-1}
-        // We only need the top-left p x p block:
-        //   dphi[i,j] = -sum_r sum_s C^{-1}[i,r] * dc[r,s] * C^{-1}[s,j]
-        //   for i,j in 0..p
-
-        let mut dphi = DMatrix::zeros(p, p);
-
-        for i in 0..p {
-            for j in 0..p {
-                let mut val = 0.0;
-                for r in 0..dim {
-                    for s in 0..dim {
-                        val += self.c_inv[(i, r)] * dc[(r, s)] * self.c_inv[(s, j)];
-                    }
-                }
-                dphi[(i, j)] = -val;
-            }
-        }
-
-        dphi
+    /// The fixed-effects covariance matrix `Φ = C^{-1}_{bb}` (p x p).
+    pub fn phi(&self) -> &DMatrix<f64> {
+        &self.phi
     }
 
     /// Compute the Satterthwaite denominator degrees of freedom for a single
@@ -230,25 +121,16 @@ impl DdfCalculator {
             p
         );
 
-        let phi = self.phi();
-        let n_params = self.variance_params.len();
-
-        // Compute l' Phi l
-        let l_phi_l = quad_form(contrast, &phi);
-
+        let n_params = self.dphi.len();
+        let l_phi_l = quad_form(contrast, &self.phi);
         if l_phi_l <= 0.0 {
-            // Degenerate case
             return 1.0;
         }
 
-        // Compute gradient vector: g_k = l' (dPhi/dtheta_k) l
-        let mut g = vec![0.0; n_params];
-        for k in 0..n_params {
-            let dphi_k = self.dphi_dtheta(k);
-            g[k] = quad_form(contrast, &dphi_k);
-        }
+        let g: Vec<f64> = (0..n_params)
+            .map(|k| quad_form(contrast, &self.dphi[k]))
+            .collect();
 
-        // Compute denominator: sum_{i,j} g_i * AI_inv_{ij} * g_j
         let mut denom = 0.0;
         for i in 0..n_params {
             for j in 0..n_params {
@@ -256,16 +138,12 @@ impl DdfCalculator {
             }
         }
 
+        let max_df = (self.n_obs - self.n_fixed) as f64;
         if denom <= 0.0 {
-            // If the denominator is non-positive, fall back to containment
-            return (self.n_obs - self.n_fixed) as f64;
+            return max_df;
         }
 
-        // Satterthwaite ddf
         let nu = 2.0 * l_phi_l * l_phi_l / denom;
-
-        // Clamp to [1, n - p]
-        let max_df = (self.n_obs - self.n_fixed) as f64;
         nu.max(1.0).min(max_df)
     }
 
@@ -278,14 +156,7 @@ impl DdfCalculator {
     ///
     /// The effective ddf is computed as a combination of per-eigenvalue
     /// Satterthwaite ddf values from the spectral decomposition of the
-    /// variance-covariance matrix of the contrast.
-    ///
-    /// For a term with q contrasts (rows of L), we decompose:
-    ///   `L Phi L'` via eigendecomposition
-    /// Then for each eigenvalue/eigenvector pair, compute the single-contrast
-    /// Satterthwaite ddf using the corresponding transformed contrast.
-    ///
-    /// The combined ddf is:
+    /// variance-covariance matrix of the contrast, `L Phi L'`:
     /// ```text
     /// nu = 2 * E / (E - q)  where E = sum_i nu_i / (nu_i - 2)  for nu_i > 2
     /// ```
@@ -293,10 +164,6 @@ impl DdfCalculator {
     /// # Arguments
     ///
     /// * `contrast_matrix` - Rows of the contrast matrix `L`, each of length p.
-    ///
-    /// # Returns
-    ///
-    /// The generalized Satterthwaite ddf.
     pub fn satterthwaite_ddf_multi(&self, contrast_matrix: &[Vec<f64>]) -> f64 {
         let q = contrast_matrix.len();
         if q == 0 {
@@ -307,9 +174,9 @@ impl DdfCalculator {
         }
 
         let p = self.n_fixed;
-        let phi = self.phi();
+        let phi = &self.phi;
 
-        // Build L (q x p) and compute L * Phi * L' (q x q)
+        // L * Phi * L' (q x q)
         let mut l_phi_lt = DMatrix::zeros(q, q);
         for i in 0..q {
             for j in 0..q {
@@ -323,20 +190,16 @@ impl DdfCalculator {
             }
         }
 
-        // Eigendecomposition of L * Phi * L'
         let eigen = l_phi_lt.symmetric_eigen();
         let eigenvalues = &eigen.eigenvalues;
         let eigenvectors = &eigen.eigenvectors;
 
-        // For each eigenvector, compute the transformed contrast and its ddf
         let mut nu_values = Vec::with_capacity(q);
         for i in 0..q {
             if eigenvalues[i] <= 1e-14 {
-                // Skip near-zero eigenvalues (rank-deficient contrast)
                 continue;
             }
             // Transformed contrast: l_i = eigenvector_i' * L
-            // This is a p-length vector
             let mut l_transformed = vec![0.0; p];
             for j in 0..p {
                 let mut val = 0.0;
@@ -345,17 +208,13 @@ impl DdfCalculator {
                 }
                 l_transformed[j] = val;
             }
-
-            let nu_i = self.satterthwaite_ddf(&l_transformed);
-            nu_values.push(nu_i);
+            nu_values.push(self.satterthwaite_ddf(&l_transformed));
         }
 
         if nu_values.is_empty() {
             return 1.0;
         }
 
-        // Combine using the formula: nu = 2E / (E - q_eff) where
-        // E = sum(nu_i / (nu_i - 2)) for nu_i > 2
         let q_eff = nu_values.len() as f64;
         let e_sum: f64 = nu_values
             .iter()
@@ -363,8 +222,8 @@ impl DdfCalculator {
                 if nu_i > 2.0 {
                     nu_i / (nu_i - 2.0)
                 } else {
-                    // For nu_i <= 2, the expectation doesn't exist;
-                    // use a large contribution to push combined df down
+                    // The expectation does not exist for nu_i <= 2; a large
+                    // contribution pushes the combined df down.
                     100.0
                 }
             })
@@ -373,7 +232,6 @@ impl DdfCalculator {
         let combined_nu = if e_sum > q_eff {
             2.0 * e_sum / (e_sum - q_eff)
         } else {
-            // Fallback
             2.0
         };
 
@@ -385,6 +243,80 @@ impl DdfCalculator {
     pub fn containment_ddf(&self) -> f64 {
         (self.n_obs - self.n_fixed) as f64
     }
+}
+
+/// `∂Φ/∂θ` for a model whose variance parameters are the scaled variances
+/// `[σ²_1, ..., σ²_r, σ²_e]` of random terms `u_k ~ N(0, σ²_k K_k)` and an
+/// IID residual.
+///
+/// With `F = C⁻¹_{·b}` (the `p` columns of `C⁻¹` belonging to the fixed
+/// effects) and `F_k` its rows for random term `k`:
+///
+/// ```text
+/// ∂Φ/∂σ²_k = F_k' K_k⁻¹ F_k / σ⁴_k
+/// ∂Φ/∂σ²_e = (W F)' (W F) / σ⁴_e,   W = [X Z_1 ... Z_r]
+/// ```
+///
+/// `kinv[k]` is the relationship-matrix inverse `K_k⁻¹` of term `k` (`None`
+/// for `K = I`).
+pub fn fixed_cov_derivatives_scaled_identity(
+    c_inv: &MmeInverse,
+    x: &SparseMat,
+    z_blocks: &[SparseMat],
+    kinv: &[Option<&SparseMat>],
+    variance_params: &[f64],
+) -> Vec<DMatrix<f64>> {
+    let p = x.cols();
+    let n = x.rows();
+    let f = c_inv.fixed_columns(p);
+    let n_terms = z_blocks.len();
+    let mut out = Vec::with_capacity(n_terms + 1);
+
+    let mut offset = p;
+    for (k, z) in z_blocks.iter().enumerate() {
+        let q = z.cols();
+        let f_k = f.rows(offset, q).into_owned();
+        let kinv_f = match kinv.get(k).copied().flatten() {
+            Some(kinv_k) => sparse_times_dense(kinv_k, &f_k),
+            None => f_k.clone(),
+        };
+        let s4 = variance_params[k] * variance_params[k];
+        out.push(f_k.transpose() * kinv_f / s4);
+        offset += q;
+    }
+
+    // W F (n x p)
+    let mut wf = DMatrix::zeros(n, p);
+    for j in 0..p {
+        let col: Vec<f64> = (0..p).map(|i| f[(i, j)]).collect();
+        let mut acc = spmv(x, &col);
+        let mut off = p;
+        for z in z_blocks {
+            let q = z.cols();
+            let col_k: Vec<f64> = (0..q).map(|i| f[(off + i, j)]).collect();
+            for (a, v) in spmv(z, &col_k).iter().enumerate() {
+                acc[a] += v;
+            }
+            off += q;
+        }
+        for i in 0..n {
+            wf[(i, j)] = acc[i];
+        }
+    }
+    let s4e = variance_params[n_terms] * variance_params[n_terms];
+    out.push(wf.transpose() * &wf / s4e);
+    out
+}
+
+/// `A B` for sparse `A` and dense `B`.
+fn sparse_times_dense(a: &SparseMat, b: &DMatrix<f64>) -> DMatrix<f64> {
+    let mut out = DMatrix::zeros(a.rows(), b.ncols());
+    for (v, (i, k)) in a.iter() {
+        for j in 0..b.ncols() {
+            out[(i, j)] += v * b[(k, j)];
+        }
+    }
+    out
 }
 
 /// Compute the quadratic form `x' A x` for vector x and matrix A.
@@ -401,49 +333,32 @@ fn quad_form(x: &[f64], a: &DMatrix<f64>) -> f64 {
 
 /// Compute Wald F-tests using Satterthwaite denominator degrees of freedom.
 ///
-/// This function computes Wald F-tests for each fixed effect term, using the
-/// Satterthwaite approximation for denominator degrees of freedom. This gives
-/// more accurate p-values for unbalanced designs compared to the simple
-/// containment method.
-///
-/// # Arguments
-///
-/// * `result` - A fitted mixed model result.
-/// * `c_inv` - The full inverse of the MME coefficient matrix at convergence.
-/// * `ai_matrix` - The Average Information matrix at convergence.
-/// * `n_random_per_term` - Number of random effect levels per random term.
+/// Uses the fixed-effects covariance matrix and its derivatives stored in
+/// the [`FitResult`] together with the Average Information matrix at
+/// convergence.
 ///
 /// # Returns
 ///
 /// A vector of `WaldTest` results with Satterthwaite ddf, or `None` if the
-/// `DdfCalculator` could not be constructed (e.g., singular AI matrix).
+/// `DdfCalculator` could not be constructed (singular AI matrix, or the
+/// derivatives are not available).
 pub fn wald_tests_satterthwaite(
     result: &FitResult,
-    c_inv: &DMatrix<f64>,
     ai_matrix: &DMatrix<f64>,
-    n_random_per_term: &[usize],
 ) -> Option<Vec<WaldTest>> {
     if result.fixed_effects.is_empty() {
         return Some(Vec::new());
     }
 
-    // Extract variance parameters from FitResult
-    let variance_params: Vec<f64> = result
-        .variance_components
-        .iter()
-        .flat_map(|vc| vc.parameters.iter().map(|(_, v)| *v))
-        .collect();
-
     let n_fixed = result.n_fixed_params;
+    let phi = rows_to_matrix(&result.fixed_cov, n_fixed)?;
+    let dphi: Vec<DMatrix<f64>> = result
+        .fixed_cov_derivatives
+        .iter()
+        .map(|m| rows_to_matrix(m, n_fixed))
+        .collect::<Option<_>>()?;
 
-    let calc = DdfCalculator::new(
-        c_inv.clone(),
-        ai_matrix.clone(),
-        n_fixed,
-        result.n_obs,
-        n_random_per_term.to_vec(),
-        variance_params,
-    )?;
+    let calc = DdfCalculator::new(phi.clone(), dphi, ai_matrix.clone(), result.n_obs)?;
 
     // Group fixed effects by term name (same logic as in wald_tests)
     let mut term_order: Vec<String> = Vec::new();
@@ -473,10 +388,8 @@ pub fn wald_tests_satterthwaite(
             let ef = &result.fixed_effects[idx];
             let se = ef.se;
 
-            // Build contrast vector: e_idx (unit vector)
             let mut contrast = vec![0.0; n_fixed];
             contrast[idx] = 1.0;
-
             let den_df = calc.satterthwaite_ddf(&contrast);
 
             if se > 0.0 {
@@ -512,13 +425,13 @@ pub fn wald_tests_satterthwaite(
 
             let den_df = calc.satterthwaite_ddf_multi(&contrast_matrix);
 
-            // General Wald F using the covariance block of C^{-1}.
+            // General Wald F using the covariance block of Phi.
             let beta: Vec<f64> = indices
                 .iter()
                 .map(|&idx| result.fixed_effects[idx].estimate)
                 .collect();
             let k = indices.len();
-            let cov = DMatrix::from_fn(k, k, |a, b| c_inv[(indices[a], indices[b])]);
+            let cov = DMatrix::from_fn(k, k, |a, b| phi[(indices[a], indices[b])]);
             let (f_stat, rank) = super::wald::wald_f_general(&beta, &cov);
             let num_df = rank.max(1);
 
@@ -541,39 +454,63 @@ pub fn wald_tests_satterthwaite(
     Some(tests)
 }
 
+fn rows_to_matrix(rows: &[Vec<f64>], p: usize) -> Option<DMatrix<f64>> {
+    if rows.len() != p || rows.iter().any(|r| r.len() != p) {
+        return None;
+    }
+    Some(DMatrix::from_fn(p, p, |i, j| rows[i][j]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lmm::{FitResult, NamedEffect, VarianceEstimate};
+    use crate::lmm::{FitResult, MixedModelEquations, NamedEffect, VarianceEstimate};
+    use crate::matrix::sparse::sparse_diagonal;
+    use approx::assert_relative_eq;
 
-    /// Helper to build a simple C^{-1} matrix for testing.
-    /// Constructs a balanced one-way random intercept model MME and inverts it.
-    fn make_simple_c_inv(p: usize, q: usize, sigma2_e: f64, sigma2_u: f64) -> DMatrix<f64> {
-        let dim = p + q;
-        let mut c = DMatrix::zeros(dim, dim);
-
-        let n_per_group = 10;
-        let n_obs = n_per_group * q;
-        let r_inv = 1.0 / sigma2_e;
-
-        // X'X / sigma2_e
-        for i in 0..p {
-            c[(i, i)] = (n_obs as f64) * r_inv;
+    /// Balanced one-way random model: intercept, `q` groups with
+    /// `n_per_group` observations each. Returns (X, Z, y).
+    fn one_way_design(q: usize, n_per_group: usize) -> (SparseMat, SparseMat, Vec<f64>) {
+        let n = q * n_per_group;
+        let mut x = sprs::TriMat::new((n, 1));
+        let mut z = sprs::TriMat::new((n, q));
+        let mut y = Vec::with_capacity(n);
+        for g in 0..q {
+            for r in 0..n_per_group {
+                let i = g * n_per_group + r;
+                x.add_triplet(i, 0, 1.0);
+                z.add_triplet(i, g, 1.0);
+                y.push(10.0 + g as f64 - 0.3 * r as f64);
+            }
         }
+        (x.to_csc(), z.to_csc(), y)
+    }
 
-        // X'Z / sigma2_e (connect first fixed effect to all random levels)
-        for j in 0..q {
-            c[(0, p + j)] = (n_per_group as f64) * r_inv;
-            c[(p + j, 0)] = (n_per_group as f64) * r_inv;
-        }
+    /// Dense `C⁻¹` of the one-way model at the given variances.
+    fn one_way_inverse(q: usize, n_per_group: usize, sigma2_u: f64, sigma2_e: f64) -> MmeInverse {
+        let (x, z, y) = one_way_design(q, n_per_group);
+        let ginv = sparse_diagonal(&vec![1.0 / sigma2_u; q]);
+        let mme = MixedModelEquations::assemble(&x, &[z], &y, 1.0 / sigma2_e, &[ginv]);
+        mme.solve().unwrap().c_inv.unwrap()
+    }
 
-        // Z'Z / sigma2_e + G^{-1}
-        for j in 0..q {
-            c[(p + j, p + j)] = (n_per_group as f64) * r_inv + 1.0 / sigma2_u;
-        }
-
-        c.try_inverse()
-            .unwrap_or_else(|| DMatrix::identity(dim, dim))
+    fn one_way_calculator(
+        q: usize,
+        n_per_group: usize,
+        sigma2_u: f64,
+        sigma2_e: f64,
+        ai: DMatrix<f64>,
+    ) -> Option<DdfCalculator> {
+        let (x, z, _) = one_way_design(q, n_per_group);
+        let c_inv = one_way_inverse(q, n_per_group, sigma2_u, sigma2_e);
+        let dphi = fixed_cov_derivatives_scaled_identity(
+            &c_inv,
+            &x,
+            std::slice::from_ref(&z),
+            &[None],
+            &[sigma2_u, sigma2_e],
+        );
+        DdfCalculator::new(c_inv.fixed_block(1), dphi, ai, q * n_per_group)
     }
 
     /// Helper to build an AI matrix for testing.
@@ -588,509 +525,229 @@ mod tests {
 
     #[test]
     fn test_ddf_calculator_creation() {
-        let p = 1;
-        let q = 5;
-        let sigma2_e = 2.0;
-        let sigma2_u = 3.0;
-        let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
-        let ai = make_simple_ai(sigma2_u, sigma2_e, q, 50);
-
-        let calc = DdfCalculator::new(c_inv, ai, p, 50, vec![q], vec![sigma2_u, sigma2_e]);
-        assert!(
-            calc.is_some(),
-            "DdfCalculator should be created successfully"
-        );
+        let (q, n_per, s2e, s2u) = (5, 10, 2.0, 3.0);
+        let ai = make_simple_ai(s2u, s2e, q, q * n_per);
+        assert!(one_way_calculator(q, n_per, s2u, s2e, ai).is_some());
     }
 
     #[test]
     fn test_ddf_calculator_singular_ai() {
-        let p = 1;
-        let q = 5;
-        let sigma2_e = 2.0;
-        let sigma2_u = 3.0;
-        let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
-
+        let (q, n_per, s2e, s2u) = (5, 10, 2.0, 3.0);
         let ai = DMatrix::zeros(2, 2);
+        assert!(one_way_calculator(q, n_per, s2u, s2e, ai).is_none());
+    }
 
-        let calc = DdfCalculator::new(c_inv, ai, p, 50, vec![q], vec![sigma2_u, sigma2_e]);
-        assert!(calc.is_none(), "DdfCalculator should fail with singular AI");
+    #[test]
+    fn derivatives_match_numerical_differentiation() {
+        let (q, n_per, s2u, s2e) = (6, 4, 1.7, 0.9);
+        let (x, z, y) = one_way_design(q, n_per);
+        let phi_at = |s2u: f64, s2e: f64| {
+            let ginv = sparse_diagonal(&vec![1.0 / s2u; q]);
+            let mme =
+                MixedModelEquations::assemble(&x, std::slice::from_ref(&z), &y, 1.0 / s2e, &[ginv]);
+            mme.solve().unwrap().c_inv.unwrap().fixed_block(1)[(0, 0)]
+        };
+        let c_inv = one_way_inverse(q, n_per, s2u, s2e);
+        let dphi = fixed_cov_derivatives_scaled_identity(
+            &c_inv,
+            &x,
+            std::slice::from_ref(&z),
+            &[None],
+            &[s2u, s2e],
+        );
+        let h = 1e-5;
+        let num_u = (phi_at(s2u + h, s2e) - phi_at(s2u - h, s2e)) / (2.0 * h);
+        let num_e = (phi_at(s2u, s2e + h) - phi_at(s2u, s2e - h)) / (2.0 * h);
+        assert_relative_eq!(dphi[0][(0, 0)], num_u, epsilon = 1e-7, max_relative = 1e-5);
+        assert_relative_eq!(dphi[1][(0, 0)], num_e, epsilon = 1e-7, max_relative = 1e-5);
+    }
+
+    #[test]
+    fn derivatives_with_relationship_matrix_match_numerical_differentiation() {
+        // Two related "animals" per group: K⁻¹ is not the identity.
+        let q = 4;
+        let n_per = 3;
+        let (x, z, y) = one_way_design(q, n_per);
+        let mut kinv_tri = sprs::TriMat::new((q, q));
+        for i in 0..q {
+            kinv_tri.add_triplet(i, i, 1.5);
+        }
+        kinv_tri.add_triplet(0, 1, -0.5);
+        kinv_tri.add_triplet(1, 0, -0.5);
+        kinv_tri.add_triplet(2, 3, -0.4);
+        kinv_tri.add_triplet(3, 2, -0.4);
+        let kinv = kinv_tri.to_csc();
+        let (s2u, s2e) = (2.0, 1.3);
+        let phi_at = |s2u: f64, s2e: f64| {
+            let ginv = kinv.map(|v| v / s2u);
+            let mme =
+                MixedModelEquations::assemble(&x, std::slice::from_ref(&z), &y, 1.0 / s2e, &[ginv]);
+            mme.solve().unwrap().c_inv.unwrap().fixed_block(1)[(0, 0)]
+        };
+        let ginv = kinv.map(|v| v / s2u);
+        let mme =
+            MixedModelEquations::assemble(&x, std::slice::from_ref(&z), &y, 1.0 / s2e, &[ginv]);
+        let c_inv = mme.solve().unwrap().c_inv.unwrap();
+        let dphi = fixed_cov_derivatives_scaled_identity(
+            &c_inv,
+            &x,
+            std::slice::from_ref(&z),
+            &[Some(&kinv)],
+            &[s2u, s2e],
+        );
+        let h = 1e-5;
+        let num_u = (phi_at(s2u + h, s2e) - phi_at(s2u - h, s2e)) / (2.0 * h);
+        let num_e = (phi_at(s2u, s2e + h) - phi_at(s2u, s2e - h)) / (2.0 * h);
+        assert_relative_eq!(dphi[0][(0, 0)], num_u, epsilon = 1e-7, max_relative = 1e-5);
+        assert_relative_eq!(dphi[1][(0, 0)], num_e, epsilon = 1e-7, max_relative = 1e-5);
     }
 
     #[test]
     fn test_satterthwaite_ddf_single_contrast() {
-        let p = 1;
-        let q = 5;
-        let sigma2_e = 2.0;
-        let sigma2_u = 3.0;
-        let n_obs = 50;
-        let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
-        let ai = make_simple_ai(sigma2_u, sigma2_e, q, n_obs);
-
-        let calc =
-            DdfCalculator::new(c_inv, ai, p, n_obs, vec![q], vec![sigma2_u, sigma2_e]).unwrap();
-
-        let contrast = vec![1.0];
-        let nu = calc.satterthwaite_ddf(&contrast);
-
-        let containment_df = (n_obs - p) as f64;
+        let (q, n_per, s2e, s2u) = (5, 10, 2.0, 3.0);
+        let n_obs = q * n_per;
+        let ai = make_simple_ai(s2u, s2e, q, n_obs);
+        let calc = one_way_calculator(q, n_per, s2u, s2e, ai).unwrap();
+        let nu = calc.satterthwaite_ddf(&[1.0]);
         assert!(nu > 0.0, "Satterthwaite ddf should be positive, got {}", nu);
-        assert!(
-            nu <= containment_df + 1e-10,
-            "Satterthwaite ddf ({}) should be <= containment df ({})",
-            nu,
-            containment_df
-        );
+        assert!(nu <= (n_obs - 1) as f64);
+        // The intercept of a one-way random model is estimated from the q
+        // group means: its df are close to q - 1 when the group variance
+        // dominates the residual.
+        assert!(nu < 20.0, "ddf {} should reflect the between-group df", nu);
     }
 
     #[test]
     fn test_satterthwaite_ddf_bounded() {
-        let p = 1;
-        let q = 3;
-        let sigma2_e = 1.0;
-        let sigma2_u = 1.0;
-        let n_obs = 30;
-        let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
-        let ai = make_simple_ai(sigma2_u, sigma2_e, q, n_obs);
-
-        let calc =
-            DdfCalculator::new(c_inv, ai, p, n_obs, vec![q], vec![sigma2_u, sigma2_e]).unwrap();
-
-        let contrast = vec![1.0];
-        let nu = calc.satterthwaite_ddf(&contrast);
-
+        let (q, n_per, s2e, s2u) = (3, 5, 1.0, 0.001);
+        let ai = make_simple_ai(s2u, s2e, q, q * n_per);
+        let calc = one_way_calculator(q, n_per, s2u, s2e, ai).unwrap();
+        let nu = calc.satterthwaite_ddf(&[1.0]);
         assert!(nu >= 1.0, "ddf should be at least 1, got {}", nu);
-        assert!(
-            nu <= (n_obs - p) as f64,
-            "ddf should be at most n-p={}, got {}",
-            n_obs - p,
-            nu
-        );
+        assert!(nu <= (q * n_per - 1) as f64, "ddf should be at most n - p");
     }
 
     #[test]
     fn test_containment_ddf() {
-        let p = 3;
-        let q = 5;
-        let sigma2_e = 1.0;
-        let sigma2_u = 2.0;
-        let n_obs = 50;
-        let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
-        let ai = make_simple_ai(sigma2_u, sigma2_e, q, n_obs);
-
-        let calc =
-            DdfCalculator::new(c_inv, ai, p, n_obs, vec![q], vec![sigma2_u, sigma2_e]).unwrap();
-
-        assert!(
-            (calc.containment_ddf() - 47.0).abs() < 1e-10,
-            "Containment ddf should be 50-3=47, got {}",
-            calc.containment_ddf()
-        );
+        let (q, n_per, s2e, s2u) = (5, 10, 2.0, 3.0);
+        let ai = make_simple_ai(s2u, s2e, q, q * n_per);
+        let calc = one_way_calculator(q, n_per, s2u, s2e, ai).unwrap();
+        assert_relative_eq!(calc.containment_ddf(), (q * n_per - 1) as f64);
     }
 
     #[test]
     fn test_satterthwaite_multi_df() {
-        let p = 3;
-        let q = 4;
-        let sigma2_e = 1.0;
-        let sigma2_u = 2.0;
-        let n_obs = 40;
-        let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
-        let ai = make_simple_ai(sigma2_u, sigma2_e, q, n_obs);
+        let (q, n_per, s2e, s2u) = (5, 10, 2.0, 3.0);
+        let ai = make_simple_ai(s2u, s2e, q, q * n_per);
+        let calc = one_way_calculator(q, n_per, s2u, s2e, ai).unwrap();
+        // A repeated contrast is rank 1: one eigenvalue is zero and the
+        // multi-df value equals the single-contrast value.
+        let nu_multi = calc.satterthwaite_ddf_multi(&[vec![1.0], vec![1.0]]);
+        assert!(nu_multi >= 1.0);
+        assert!(nu_multi <= (q * n_per - 1) as f64);
+        assert_relative_eq!(nu_multi, calc.satterthwaite_ddf(&[1.0]), epsilon = 1e-9);
+    }
 
-        let calc =
-            DdfCalculator::new(c_inv, ai, p, n_obs, vec![q], vec![sigma2_u, sigma2_e]).unwrap();
+    #[test]
+    fn test_phi_extraction() {
+        let (q, n_per, s2e, s2u) = (4, 5, 2.0, 3.0);
+        let ai = make_simple_ai(s2u, s2e, q, q * n_per);
+        let calc = one_way_calculator(q, n_per, s2u, s2e, ai).unwrap();
+        let expected = one_way_inverse(q, n_per, s2u, s2e).entry(0, 0);
+        assert_eq!(calc.phi().nrows(), 1);
+        assert_relative_eq!(calc.phi()[(0, 0)], expected, epsilon = 1e-12);
+    }
 
-        let contrast_matrix = vec![vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0]];
-
-        let nu = calc.satterthwaite_ddf_multi(&contrast_matrix);
-        let containment_df = (n_obs - p) as f64;
-
-        assert!(nu >= 1.0, "Multi-df should be >= 1, got {}", nu);
-        assert!(
-            nu <= containment_df + 1e-10,
-            "Multi-df ({}) should be <= containment df ({})",
-            nu,
-            containment_df
+    fn one_way_fit_result(q: usize, n_per: usize, s2u: f64, s2e: f64) -> FitResult {
+        let (x, z, _) = one_way_design(q, n_per);
+        let c_inv = one_way_inverse(q, n_per, s2u, s2e);
+        let dphi = fixed_cov_derivatives_scaled_identity(
+            &c_inv,
+            &x,
+            std::slice::from_ref(&z),
+            &[None],
+            &[s2u, s2e],
         );
+        let phi = c_inv.fixed_block(1);
+        FitResult {
+            variance_components: vec![
+                VarianceEstimate {
+                    name: "group".into(),
+                    structure: "Identity".into(),
+                    parameters: vec![("sigma2".into(), s2u)],
+                    se: vec![0.0],
+                    at_boundary: vec![false],
+                },
+                VarianceEstimate {
+                    name: "residual".into(),
+                    structure: "Identity".into(),
+                    parameters: vec![("sigma2".into(), s2e)],
+                    se: vec![0.0],
+                    at_boundary: vec![false],
+                },
+            ],
+            fixed_effects: vec![NamedEffect {
+                term: "mu".into(),
+                level: "intercept".into(),
+                estimate: 12.0,
+                se: phi[(0, 0)].sqrt(),
+            }],
+            random_effects: vec![],
+            log_likelihood: 0.0,
+            n_iterations: 1,
+            converged: true,
+            history: vec![],
+            variance_se: vec![0.0, 0.0],
+            residuals: vec![],
+            fixed_cov: vec![vec![phi[(0, 0)]]],
+            at_boundary: vec![false, false],
+            n_obs: q * n_per,
+            n_fixed_params: 1,
+            n_variance_params: 2,
+            c_inv: Some(c_inv),
+            ai_matrix: None,
+            n_random_per_term: vec![q],
+            fixed_cov_derivatives: dphi.iter().map(|m| vec![vec![m[(0, 0)]]]).collect(),
+        }
     }
 
     #[test]
     fn test_wald_tests_satterthwaite_basic() {
-        let p = 1;
-        let q = 3;
-        let sigma2_e = 1.0;
-        let sigma2_u = 2.0;
-        let n_obs = 30;
-
-        let result = FitResult {
-            variance_components: vec![
-                VarianceEstimate {
-                    name: "group".to_string(),
-                    structure: "Identity".to_string(),
-                    parameters: vec![("sigma2".to_string(), sigma2_u)],
-                    se: vec![],
-                    at_boundary: vec![],
-                },
-                VarianceEstimate {
-                    name: "residual".to_string(),
-                    structure: "Identity".to_string(),
-                    parameters: vec![("sigma2".to_string(), sigma2_e)],
-                    se: vec![],
-                    at_boundary: vec![],
-                },
-            ],
-            fixed_effects: vec![NamedEffect {
-                term: "mu".to_string(),
-                level: "intercept".to_string(),
-                estimate: 5.0,
-                se: 0.5,
-            }],
-            random_effects: vec![],
-            log_likelihood: -50.0,
-            n_iterations: 10,
-            converged: true,
-            history: vec![],
-            variance_se: vec![0.5, 0.3],
-            residuals: vec![],
-            fixed_cov: vec![],
-            at_boundary: vec![],
-            n_obs,
-            n_fixed_params: p,
-            n_variance_params: 2,
-            c_inv: None,
-            ai_matrix: None,
-            n_random_per_term: vec![],
-        };
-
-        let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
-        let ai = make_simple_ai(sigma2_u, sigma2_e, q, n_obs);
-
-        let tests = wald_tests_satterthwaite(&result, &c_inv, &ai, &[q]);
-        assert!(tests.is_some(), "Should produce Wald tests");
-
-        let tests = tests.unwrap();
+        let (q, n_per, s2u, s2e) = (5, 10, 3.0, 2.0);
+        let result = one_way_fit_result(q, n_per, s2u, s2e);
+        let ai = make_simple_ai(s2u, s2e, q, q * n_per);
+        let tests = wald_tests_satterthwaite(&result, &ai).expect("Should produce Wald tests");
         assert_eq!(tests.len(), 1);
         assert_eq!(tests[0].term, "mu");
         assert_eq!(tests[0].num_df, 1);
-        assert!(
-            tests[0].den_df > 0.0,
-            "Satterthwaite ddf should be positive"
-        );
-        assert!(
-            tests[0].den_df <= (n_obs - p) as f64 + 1e-10,
-            "Satterthwaite ddf ({}) should be <= containment df ({})",
-            tests[0].den_df,
-            (n_obs - p)
-        );
+        assert!(tests[0].den_df >= 1.0 && tests[0].den_df <= (q * n_per - 1) as f64);
+        assert!(tests[0].f_statistic > 0.0);
+        assert!(tests[0].p_value >= 0.0 && tests[0].p_value <= 1.0);
+        // Through the FitResult method the AI matrix is required.
+        assert!(result.wald_tests_satterthwaite().is_none());
+        let mut with_ai = result.clone();
+        with_ai.ai_matrix = Some(ai);
+        assert_eq!(with_ai.wald_tests_satterthwaite().unwrap().len(), 1);
     }
 
     #[test]
     fn test_wald_tests_satterthwaite_empty() {
-        let result = FitResult {
-            variance_components: vec![],
-            fixed_effects: vec![],
-            random_effects: vec![],
-            log_likelihood: 0.0,
-            n_iterations: 0,
-            converged: true,
-            history: vec![],
-            variance_se: vec![],
-            residuals: vec![],
-            fixed_cov: vec![],
-            at_boundary: vec![],
-            n_obs: 10,
-            n_fixed_params: 0,
-            n_variance_params: 0,
-            c_inv: None,
-            ai_matrix: None,
-            n_random_per_term: vec![],
-        };
-
-        let c_inv = DMatrix::zeros(0, 0);
-        let ai = DMatrix::zeros(0, 0);
-
-        let tests = wald_tests_satterthwaite(&result, &c_inv, &ai, &[]);
+        let mut result = one_way_fit_result(3, 4, 1.0, 1.0);
+        result.fixed_effects.clear();
+        let ai = make_simple_ai(1.0, 1.0, 3, 12);
+        let tests = wald_tests_satterthwaite(&result, &ai);
         assert!(tests.is_some());
         assert!(tests.unwrap().is_empty());
     }
 
     #[test]
     fn test_satterthwaite_vs_containment_balanced() {
-        let p = 1;
-        let q = 5;
-        let sigma2_e = 1.0;
-        let sigma2_u = 2.0;
-        let n_per_group = 10;
-        let n_obs = n_per_group * q;
-
-        let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
-        let ai = make_simple_ai(sigma2_u, sigma2_e, q, n_obs);
-
-        let calc =
-            DdfCalculator::new(c_inv, ai, p, n_obs, vec![q], vec![sigma2_u, sigma2_e]).unwrap();
-
-        let contrast = vec![1.0];
-        let satt_df = calc.satterthwaite_ddf(&contrast);
-        let cont_df = calc.containment_ddf();
-
-        assert!(
-            satt_df <= cont_df + 1e-10,
-            "Satterthwaite ({}) should be <= containment ({})",
-            satt_df,
-            cont_df
-        );
-        assert!(
-            satt_df > 0.5 * cont_df || satt_df >= 1.0,
-            "For balanced data, Satterthwaite ({}) should not be too much smaller than containment ({})",
-            satt_df,
-            cont_df
-        );
-    }
-
-    #[test]
-    fn test_phi_extraction() {
-        let p = 2;
-        let q = 3;
-        let sigma2_e = 1.0;
-        let sigma2_u = 2.0;
-        let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
-
-        let ai = make_simple_ai(sigma2_u, sigma2_e, q, 30);
-        let calc = DdfCalculator::new(c_inv.clone(), ai, p, 30, vec![q], vec![sigma2_u, sigma2_e])
-            .unwrap();
-
-        let phi = calc.phi();
-        assert_eq!(phi.nrows(), p);
-        assert_eq!(phi.ncols(), p);
-
-        for i in 0..p {
-            for j in 0..p {
-                assert!(
-                    (phi[(i, j)] - c_inv[(i, j)]).abs() < 1e-12,
-                    "Phi[{},{}] = {} but C^{{-1}}[{},{}] = {}",
-                    i,
-                    j,
-                    phi[(i, j)],
-                    i,
-                    j,
-                    c_inv[(i, j)]
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_dc_dtheta_random_component() {
-        let p = 1;
-        let q = 3;
-        let sigma2_e = 1.0;
-        let sigma2_u = 2.0;
-        let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
-        let ai = make_simple_ai(sigma2_u, sigma2_e, q, 30);
-
-        let calc = DdfCalculator::new(c_inv, ai, p, 30, vec![q], vec![sigma2_u, sigma2_e]).unwrap();
-
-        let dc = calc.dc_dtheta(0);
-        let dim = p + q;
-
-        // Fixed block should be zero
-        for i in 0..p {
-            for j in 0..dim {
-                assert!(
-                    dc[(i, j)].abs() < 1e-14,
-                    "dC/dtheta[{},{}] should be 0 (fixed row), got {}",
-                    i,
-                    j,
-                    dc[(i, j)]
-                );
-            }
-        }
-
-        // Random block diagonal should be -1/sigma2_u^2
-        let expected = -1.0 / (sigma2_u * sigma2_u);
-        for i in 0..q {
-            assert!(
-                (dc[(p + i, p + i)] - expected).abs() < 1e-14,
-                "dC/dtheta diagonal[{}] should be {}, got {}",
-                i,
-                expected,
-                dc[(p + i, p + i)]
-            );
-        }
-    }
-
-    #[test]
-    fn test_quad_form() {
-        let a = DMatrix::from_row_slice(2, 2, &[2.0, 1.0, 1.0, 3.0]);
-        let x = vec![1.0, 2.0];
-        // x'Ax = 1*2*1 + 1*1*2 + 2*1*1 + 2*3*2 = 2 + 2 + 2 + 12 = 18
-        let result = quad_form(&x, &a);
-        assert!(
-            (result - 18.0).abs() < 1e-10,
-            "quad_form should be 18, got {}",
-            result
-        );
-    }
-
-    #[test]
-    fn test_wald_tests_satterthwaite_multi_level() {
-        let p = 3;
-        let q = 4;
-        let sigma2_e = 1.0;
-        let sigma2_u = 2.0;
-        let n_obs = 40;
-
-        let result = FitResult {
-            variance_components: vec![
-                VarianceEstimate {
-                    name: "block".to_string(),
-                    structure: "Identity".to_string(),
-                    parameters: vec![("sigma2".to_string(), sigma2_u)],
-                    se: vec![],
-                    at_boundary: vec![],
-                },
-                VarianceEstimate {
-                    name: "residual".to_string(),
-                    structure: "Identity".to_string(),
-                    parameters: vec![("sigma2".to_string(), sigma2_e)],
-                    se: vec![],
-                    at_boundary: vec![],
-                },
-            ],
-            fixed_effects: vec![
-                NamedEffect {
-                    term: "mu".to_string(),
-                    level: "intercept".to_string(),
-                    estimate: 10.0,
-                    se: 0.4,
-                },
-                NamedEffect {
-                    term: "trt".to_string(),
-                    level: "A".to_string(),
-                    estimate: 2.0,
-                    se: 0.6,
-                },
-                NamedEffect {
-                    term: "trt".to_string(),
-                    level: "B".to_string(),
-                    estimate: -1.0,
-                    se: 0.6,
-                },
-            ],
-            random_effects: vec![],
-            log_likelihood: -60.0,
-            n_iterations: 8,
-            converged: true,
-            history: vec![],
-            variance_se: vec![0.8, 0.4],
-            residuals: vec![],
-            fixed_cov: vec![],
-            at_boundary: vec![],
-            n_obs,
-            n_fixed_params: p,
-            n_variance_params: 2,
-            c_inv: None,
-            ai_matrix: None,
-            n_random_per_term: vec![],
-        };
-
-        let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
-        let ai = make_simple_ai(sigma2_u, sigma2_e, q, n_obs);
-
-        let tests = wald_tests_satterthwaite(&result, &c_inv, &ai, &[q]);
-        assert!(tests.is_some());
-
-        let tests = tests.unwrap();
-        assert_eq!(tests.len(), 2);
-
-        assert_eq!(tests[0].term, "mu");
-        assert_eq!(tests[0].num_df, 1);
-        assert!(tests[0].den_df > 0.0);
-        assert!(tests[0].den_df <= (n_obs - p) as f64 + 1e-10);
-
-        assert_eq!(tests[1].term, "trt");
-        assert_eq!(tests[1].num_df, 2);
-        assert!(tests[1].den_df > 0.0);
-        assert!(tests[1].den_df <= (n_obs - p) as f64 + 1e-10);
-    }
-
-    #[test]
-    fn test_dphi_dtheta_symmetry() {
-        let p = 2;
-        let q = 3;
-        let sigma2_e = 1.0;
-        let sigma2_u = 2.0;
-        let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
-        let ai = make_simple_ai(sigma2_u, sigma2_e, q, 30);
-
-        let calc = DdfCalculator::new(c_inv, ai, p, 30, vec![q], vec![sigma2_u, sigma2_e]).unwrap();
-
-        // Check symmetry for derivative w.r.t. random component
-        let dphi_0 = calc.dphi_dtheta(0);
-        for i in 0..p {
-            for j in 0..p {
-                assert!(
-                    (dphi_0[(i, j)] - dphi_0[(j, i)]).abs() < 1e-12,
-                    "dPhi/dtheta_0 should be symmetric: [{},{}]={} vs [{},{}]={}",
-                    i,
-                    j,
-                    dphi_0[(i, j)],
-                    j,
-                    i,
-                    dphi_0[(j, i)]
-                );
-            }
-        }
-
-        // Check symmetry for derivative w.r.t. residual
-        let dphi_1 = calc.dphi_dtheta(1);
-        for i in 0..p {
-            for j in 0..p {
-                assert!(
-                    (dphi_1[(i, j)] - dphi_1[(j, i)]).abs() < 1e-12,
-                    "dPhi/dtheta_1 should be symmetric: [{},{}]={} vs [{},{}]={}",
-                    i,
-                    j,
-                    dphi_1[(i, j)],
-                    j,
-                    i,
-                    dphi_1[(j, i)]
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_dc_dtheta_residual_structure() {
-        let p = 1;
-        let q = 3;
-        let sigma2_e = 2.0;
-        let sigma2_u = 3.0;
-        let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
-        let ai = make_simple_ai(sigma2_u, sigma2_e, q, 30);
-
-        let calc = DdfCalculator::new(c_inv, ai, p, 30, vec![q], vec![sigma2_u, sigma2_e]).unwrap();
-
-        let dc = calc.dc_dtheta(1);
-        let dim = p + q;
-
-        // The fixed block should be non-zero and negative
-        assert!(
-            dc[(0, 0)] < 0.0,
-            "dC/d(sigma2_e) for fixed block should be negative, got {}",
-            dc[(0, 0)]
-        );
-
-        // The derivative should be symmetric
-        for i in 0..dim {
-            for j in 0..dim {
-                assert!(
-                    (dc[(i, j)] - dc[(j, i)]).abs() < 1e-10,
-                    "dC/d(sigma2_e) should be symmetric at [{},{}]",
-                    i,
-                    j
-                );
-            }
-        }
+        let (q, n_per, s2e, s2u) = (5, 10, 2.0, 3.0);
+        let n_obs = q * n_per;
+        let ai = make_simple_ai(s2u, s2e, q, n_obs);
+        let calc = one_way_calculator(q, n_per, s2u, s2e, ai).unwrap();
+        let nu = calc.satterthwaite_ddf(&[1.0]);
+        assert!(nu <= calc.containment_ddf());
+        assert!(nu >= 1.0);
     }
 }

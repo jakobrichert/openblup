@@ -1,3 +1,4 @@
+use crate::lmm::MmeInverse;
 use crate::types::SparseMat;
 
 /// Comprehensive residual diagnostics for a fitted mixed model.
@@ -27,7 +28,10 @@ pub struct ResidualDiagnostics {
 /// - `z`: combined random effects design matrix (n × q)
 /// - `fixed`: estimated fixed effects b̂ (p)
 /// - `random`: estimated random effects û (q)
-/// - `c_inv`: full C⁻¹ matrix ((p+q) × (p+q))
+/// - `c_inv`: inverse of the MME coefficient matrix ((p+q) × (p+q); the
+///   sparse inverse subset suffices because a leverage only needs `C⁻¹` at
+///   pairs of equations that share an observation, which are in the pattern
+///   of `C`)
 /// - `sigma2_e`: residual variance
 pub fn compute_diagnostics(
     y: &[f64],
@@ -35,12 +39,11 @@ pub fn compute_diagnostics(
     z: &SparseMat,
     fixed: &[f64],
     random: &[f64],
-    c_inv: &nalgebra::DMatrix<f64>,
+    c_inv: &MmeInverse,
     sigma2_e: f64,
 ) -> ResidualDiagnostics {
     let n = y.len();
     let p = x.cols();
-    let q = z.cols();
 
     // Fitted values: ŷ = Xb̂ + Zû
     let xb = crate::matrix::sparse::spmv(x, fixed);
@@ -53,29 +56,28 @@ pub fn compute_diagnostics(
     // Marginal residuals: e_m = y - Xb̂
     let marginal: Vec<f64> = (0..n).map(|i| y[i] - xb[i]).collect();
 
-    // Leverage: h_ii = (1/σ²_e) * w_i' C⁻¹ w_i where w_i = [x_i; z_i]
+    // Leverage: h_ii = (1/σ²_e) * w_i' C⁻¹ w_i where w_i = [x_i; z_i] is
+    // row i of [X, Z]; only its nonzero entries matter.
+    let x_csr = x.to_csr();
+    let z_csr = z.to_csr();
     let mut leverage = vec![0.0; n];
+    let mut w: Vec<(usize, f64)> = Vec::new();
     for i in 0..n {
-        // Construct w_i = [x_i; z_i] (row i of [X, Z])
-        let mut w = vec![0.0; p + q];
-        // Extract row i from X
-        for (val, (r, c)) in x.iter() {
-            if r == i {
-                w[c] = *val;
+        w.clear();
+        if let Some(row) = x_csr.outer_view(i) {
+            for (c, v) in row.iter() {
+                w.push((c, *v));
             }
         }
-        // Extract row i from Z
-        for (val, (r, c)) in z.iter() {
-            if r == i {
-                w[p + c] = *val;
+        if let Some(row) = z_csr.outer_view(i) {
+            for (c, v) in row.iter() {
+                w.push((p + c, *v));
             }
         }
-
-        // h_ii = (1/σ²_e) * w' C⁻¹ w
         let mut h = 0.0;
-        for a in 0..(p + q) {
-            for b in 0..(p + q) {
-                h += w[a] * c_inv[(a, b)] * w[b];
+        for (a, va) in &w {
+            for (b, vb) in &w {
+                h += va * c_inv.entry(*a, *b) * vb;
             }
         }
         leverage[i] = (h / sigma2_e).clamp(0.0, 1.0);
@@ -199,7 +201,7 @@ mod tests {
         SparseMat,
         Vec<f64>,
         Vec<f64>,
-        nalgebra::DMatrix<f64>,
+        MmeInverse,
         f64,
     ) {
         // 4 obs, 1 fixed (intercept), 2 random levels
@@ -223,7 +225,7 @@ mod tests {
         let sigma2_e = 1.0;
 
         // Simple C⁻¹ (3×3 identity scaled)
-        let c_inv = nalgebra::DMatrix::from_diagonal_element(3, 3, 0.5);
+        let c_inv = MmeInverse::Dense(nalgebra::DMatrix::from_diagonal_element(3, 3, 0.5));
 
         (y, x, z, fixed, random, c_inv, sigma2_e)
     }

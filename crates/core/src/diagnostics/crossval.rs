@@ -20,7 +20,7 @@
 //! ```
 
 use crate::error::{LmmError, Result};
-use crate::lmm::MixedModelEquations;
+use crate::lmm::SparseMixedModelEquations;
 use crate::matrix::sparse::{sparse_diagonal, spmv};
 
 use rand::seq::SliceRandom;
@@ -260,7 +260,7 @@ impl CrossValidator {
             let r_inv_scale = 1.0 / sigma2_e;
 
             // Assemble and solve MME
-            let mme = MixedModelEquations::assemble(
+            let mme = SparseMixedModelEquations::assemble(
                 &x_train,
                 std::slice::from_ref(&z_train),
                 &y_train,
@@ -269,10 +269,7 @@ impl CrossValidator {
             );
             let sol = mme.solve()?;
 
-            let c_inv = sol
-                .c_inv
-                .as_ref()
-                .ok_or(LmmError::CholeskyFailed("C^{-1} not available".into()))?;
+            let c_inv = sol.inverse()?;
 
             let n_fixed = mme.n_fixed;
             let n_eff = (n_train - n_fixed) as f64;
@@ -300,21 +297,11 @@ impl CrossValidator {
 
             let n_fixed_cols = mme.n_fixed;
             let trace_term = if let Some(ginv_mat) = ginv {
-                let mut tr = 0.0;
-                for i in 0..q {
-                    for j in 0..q {
-                        let kinv_ij = ginv_mat.get(i, j).copied().unwrap_or(0.0);
-                        let cinv_ji = c_inv[(n_fixed_cols + j, n_fixed_cols + i)];
-                        tr += kinv_ij * cinv_ji;
-                    }
-                }
-                tr
+                c_inv.trace_block(ginv_mat, n_fixed_cols)
             } else {
-                let mut tr = 0.0;
-                for i in 0..q {
-                    tr += c_inv[(n_fixed_cols + i, n_fixed_cols + i)];
-                }
-                tr
+                sol.c_inv_diag[n_fixed_cols..n_fixed_cols + q]
+                    .iter()
+                    .sum::<f64>()
             };
 
             let new_sigma2_g = ((u_quadratic + trace_term) / q as f64).max(1e-10);
@@ -340,7 +327,7 @@ impl CrossValidator {
         };
 
         let r_inv_scale = 1.0 / sigma2_e;
-        let mme = MixedModelEquations::assemble(
+        let mme = SparseMixedModelEquations::assemble(
             &x_train,
             std::slice::from_ref(&z_train),
             &y_train,

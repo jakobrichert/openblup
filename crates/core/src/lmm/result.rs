@@ -1,6 +1,7 @@
 use nalgebra::DMatrix;
 use serde::Serialize;
 
+use super::mme::MmeInverse;
 use crate::diagnostics::{
     compute_diagnostics, wald_tests_satterthwaite, ResidualDiagnostics, WaldTest,
 };
@@ -41,15 +42,21 @@ pub struct FitResult {
     pub n_obs: usize,
     pub n_fixed_params: usize,
     pub n_variance_params: usize,
-    /// Full inverse of the MME coefficient matrix at convergence
-    /// (`(p + q) x (p + q)`), used for Satterthwaite degrees of freedom and
-    /// residual diagnostics.
+    /// Inverse of the MME coefficient matrix at convergence (dense, or a
+    /// sparse inverse subset plus factorization), used for residual
+    /// diagnostics and post-hoc contrasts.
     #[serde(skip)]
-    pub c_inv: Option<DMatrix<f64>>,
+    pub c_inv: Option<MmeInverse>,
     /// Average information matrix of the variance parameters at convergence
     /// (`None` after EM-REML).
     #[serde(skip)]
     pub ai_matrix: Option<DMatrix<f64>>,
+    /// Derivatives of the fixed-effects covariance matrix `Φ = C⁻¹_{bb}`
+    /// with respect to each variance parameter (same order as the
+    /// parameters of `variance_components`), `p x p` each, stored row by row.
+    /// Used for Satterthwaite degrees of freedom; empty when not available.
+    #[serde(skip)]
+    pub fixed_cov_derivatives: Vec<Vec<Vec<f64>>>,
     /// Number of levels of each random term (block sizes of the random part
     /// of the MME).
     pub n_random_per_term: Vec<usize>,
@@ -140,17 +147,17 @@ impl FitResult {
 
     /// Wald F-tests with Satterthwaite denominator degrees of freedom.
     ///
-    /// Available for scaled-identity models fitted by AI-REML (needs the
-    /// average information matrix and `C⁻¹`); returns `None` otherwise, in
-    /// which case [`wald_tests`](crate::diagnostics::wald_tests) with
-    /// containment df applies.
+    /// Available for models fitted by AI-REML with no parameter on the
+    /// boundary (needs the average information matrix and the derivatives
+    /// of the fixed-effects covariance); returns `None` otherwise, in which
+    /// case [`wald_tests`](crate::diagnostics::wald_tests) with containment
+    /// df applies.
     pub fn wald_tests_satterthwaite(&self) -> Option<Vec<WaldTest>> {
-        if !self.is_scaled_identity_model() {
+        if self.fixed_cov_derivatives.is_empty() {
             return None;
         }
-        let c_inv = self.c_inv.as_ref()?;
         let ai = self.ai_matrix.as_ref()?;
-        wald_tests_satterthwaite(self, c_inv, ai, &self.n_random_per_term)
+        wald_tests_satterthwaite(self, ai)
     }
 
     /// Residual diagnostics (conditional/marginal residuals, leverage,
