@@ -1,6 +1,6 @@
 # OpenBLUP
 
-**Open-source REML and BLUP for plant and animal breeding** — a modern linear mixed model engine written in Rust with Python bindings.
+**Open-source REML and BLUP for plant and animal breeding** — a modern linear mixed model engine written in Rust with Python bindings, a command-line tool and a WebAssembly build.
 
 ## Why This Project?
 
@@ -21,18 +21,20 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 ## Features
 
 ### Core Engine
-- **AI-REML** (Average Information) with quadratic convergence + EM-REML fallback
-- **Henderson's Mixed Model Equations** (MME) — dense and sparse assembly/solve
-- **BLUP/BLUE** extraction with standard errors
-- **Sparse Cholesky solver** via [faer](https://github.com/sarah-ek/faer-rs) (supernodal, symbolic/numeric split)
-- **Wald F-tests** for fixed effects with p-values
-- **Diagnostics**: Log-likelihood, AIC, BIC, convergence monitoring
+- **AI-REML** (Average Information) with exact REML scores, a likelihood safeguard and EM burn-in/fallback; parameters that reach zero are fixed at the boundary and reported as such (like ASReml's `B`)
+- **Henderson's Mixed Model Equations** (MME) assembly and solve
+- **BLUP/BLUE** extraction with standard errors, reliabilities and the full fixed-effects covariance matrix
+- **Treatment contrasts** for factors (`mu + rep` is full rank, like R's `model.matrix`)
+- **Wald F-tests** for fixed effects using the full covariance block, containment or Satterthwaite denominator df
+- **Diagnostics**: log-likelihood, AIC, BIC, convergence monitoring, residual diagnostics
+- **Missing data**: `NA`/empty fields in CSV files become `NaN`; rows with a missing response are dropped
 
 ### Pedigree BLUP (Animal Model)
 - Pedigree parsing and validation (CSV, programmatic)
 - Henderson's A-inverse with Meuwissen & Luo (1992) inbreeding
 - Topological sort for correct pedigree ordering
-- Validated against Mrode (2005) textbook examples
+- Animals without records (ancestors) get breeding values — the random term follows the pedigree ordering, not the data
+- Validated against Mrode (2005) Example 3.1, through the raw MME *and* through the public builder API
 
 ### Genomic BLUP (GBLUP)
 - VanRaden Method 1 (2008) G-matrix construction
@@ -45,6 +47,7 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 - **Kronecker product** for separable spatial models (AR1 x AR1)
 - **Diagonal** (heterogeneous variances)
 - **Unstructured** covariance (Cholesky parameterized)
+- **Factor analytic** (FA1, FA2, ...) with Woodbury inverse (Smith et al. 2001)
 - **Identity** (IID random effects)
 
 ### Multi-trait Models
@@ -53,164 +56,159 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 - Genetic correlation estimation
 - Positive-definiteness enforcement via eigenvalue bending
 
-### Python Bindings (PyO3)
-- `MixedModel` class with fluent API
-- `Pedigree` class with CSV import and A-inverse
-- `compute_g_matrix()` from numpy marker arrays
-- scipy.sparse interop for relationship matrices
+### Selection Indices, Marker Models, Cross-Validation
+- Smith-Hazel, restricted (Kempthorne & Nordskog) and desired-gains (Pesek & Baker) indices
+- RR-BLUP marker effect model with EM-REML
+- k-fold, stratified and leave-one-out cross-validation with prediction accuracy, bias and MSEP
+
+### Python Package (`openblup`)
+- `MixedModel`, `Pedigree`, `FitResult` with numpy, scipy.sparse and pandas interop
 - Full type stubs for IDE autocompletion
-- Install via `pip install -e .` (maturin)
+- Install with `pip install .` (maturin)
 
-### CLI Tool
-- `openblup fit` — fit models from CSV with formula specification
-- `openblup ainverse` — compute and inspect A-inverse from pedigree
-- Text and JSON output formats
-
-### Data I/O
-- CSV import with automatic type detection (numeric vs. categorical)
-- Flexible model specification with builder pattern API
-
-### Factor Analytic (FA) Models
-- FA1, FA2, and higher-order factor analytic covariance structures
-- Woodbury identity for efficient inverse: Σ⁻¹ = Ψ⁻¹ - Ψ⁻¹Λ(I + Λ'Ψ⁻¹Λ)⁻¹Λ'Ψ⁻¹
-- Reduced-rank modeling for multi-environment trials (Smith et al. 2001)
-
-### Residual Diagnostics
-- Conditional and marginal residuals
-- Leverage (hat values), Cook's distance
-- Standardized and studentized residuals
-- Satterthwaite denominator degrees of freedom for Wald F-tests
-
-### Selection Indices
-- Smith-Hazel index: b = P⁻¹Ga (Smith 1936, Hazel 1943)
-- Restricted index (Kempthorne & Nordskog 1959) — zero gain on restricted traits
-- Desired gains index (Pesek & Baker 1969)
-- Accuracy, expected genetic gain, index variance
-
-### Marker Effect Models (RR-BLUP)
-- Ridge regression BLUP for individual SNP marker effects
-- EM-REML for variance component estimation
-- Genomic prediction from marker effects
-
-### Cross-Validation
-- k-fold and leave-one-out cross-validation
-- Stratified fold creation
-- Prediction accuracy (Pearson correlation, regression slope)
-
-### Sparse Inverse Subset
-- Sparse Cholesky factorization (left-looking algorithm)
-- Selected elements of C⁻¹ via Takahashi equations
-- Efficient tr(A⁻¹B) computation
-
-### GPU Acceleration (feature-gated)
-- `gpu` feature flag for optional GPU support
-- CPU fallback for G-matrix computation
-- Architecture ready for wgpu compute shaders
+### CLI Tool (`openblup`)
+- `openblup fit` — fit models from CSV; text or JSON output, BLUP export to CSV
+- `openblup ainverse` — compute, inspect and export the A-inverse and inbreeding coefficients
 
 ### WebAssembly Target
-- Self-contained WASM crate (no rayon, no faer, no file I/O)
-- JSON API for A-inverse, mixed model fitting, G-matrix
-- Browser demo page included
+- Self-contained `openblup-wasm` crate (no rayon, no faer, no file I/O) with `wasm-bindgen` exports
+- JSON API for A-inverse (with inbreeding), single-random-term EM-REML and the G-matrix
+- Browser demo page in `crates/wasm/www`
+
+### Current limitations (honest status)
+- The MME are assembled and solved **densely**. The sparse Cholesky and sparse-inverse-subset code in `crates/core/src/matrix` exists and is tested, but is not yet wired into the REML engines, so practical problem size is a few thousand equations.
+- The `gpu` feature compiles a backend *interface* only; all computation runs on the CPU until a `wgpu` backend is contributed.
+- Multi-trait models use EM-REML only; Kenward-Roger degrees of freedom are not implemented.
 
 ## Quick Start (Rust)
 
+This is `crates/core/examples/quick_start.rs`; run it with
+`cargo run -p plant-breeding-lmm-core --example quick_start`.
+
 ```rust
 use plant_breeding_lmm_core::data::DataFrame;
+use plant_breeding_lmm_core::genetics::Pedigree;
 use plant_breeding_lmm_core::model::MixedModelBuilder;
 use plant_breeding_lmm_core::variance::Identity;
-use plant_breeding_lmm_core::genetics::{Pedigree, compute_a_inverse};
 
-// Load data
-let df = DataFrame::from_csv("field_trial.csv")?;
+fn main() -> plant_breeding_lmm_core::Result<()> {
+    // Load data; numeric columns with NA become NaN, so drop missing plots first.
+    let mut df = DataFrame::from_csv("examples/field_trial.csv")?.drop_missing("yield")?;
+    df.as_factor("rep")?; // rep is coded 1, 2, 3 in the file
 
-// Simple model: yield = rep (fixed) + genotype (random, IID) + error
-let mut model = MixedModelBuilder::new()
-    .data(&df)
-    .response("yield")
-    .fixed("rep")
-    .random("genotype", Identity::new(1.0), None)
-    .build()?;
+    // yield = mu + rep (fixed, treatment contrasts) + genotype (random, IID) + error
+    let mut model = MixedModelBuilder::new()
+        .data(&df)
+        .response("yield")
+        .fixed("mu + rep")
+        .random("genotype", Identity::new(1.0), None)
+        .build()?;
+    let result = model.fit_reml()?;
+    println!("{}", result.summary());
 
-let result = model.fit_reml()?;
-println!("{}", result.summary());
-
-// With pedigree relationship matrix
-let ped = Pedigree::from_csv("pedigree.csv")?;
-let a_inv = compute_a_inverse(&ped)?;
-
-let mut model = MixedModelBuilder::new()
-    .data(&df)
-    .response("yield")
-    .fixed("rep")
-    .random("animal", Identity::new(1.0), Some(a_inv))
-    .build()?;
-
-let result = model.fit_reml()?;
-println!("{}", result.summary());
+    // Animal model: the random term follows the pedigree (all animals get a BLUP,
+    // including the 12 founders without records)
+    let records = DataFrame::from_csv("examples/animal_records.csv")?;
+    let ped = Pedigree::from_csv("examples/animal_pedigree.csv")?;
+    let mut model = MixedModelBuilder::new()
+        .data(&records)
+        .response("weight")
+        .fixed("sex")
+        .random_pedigree("animal", Identity::new(1.0), &ped)
+        .build()?;
+    let result = model.fit_reml()?;
+    println!("{}", result.summary());
+    Ok(())
+}
 ```
 
 ## Quick Start (Python)
 
 ```bash
-# Install (requires Rust toolchain + maturin)
-pip install maturin
-pip install -e .
+# Install (requires the Rust toolchain)
+pip install .            # or: pip install maturin && maturin develop --release
 ```
 
 ```python
-from plant_breeding_lmm import MixedModel, Pedigree, compute_a_inverse
+from openblup import MixedModel, Pedigree, compute_a_inverse, compute_g_matrix
 
 # Fit a simple mixed model
 model = MixedModel()
-model.load_csv("field_trial.csv")
+model.load_csv("examples/field_trial.csv")   # rows with a missing response are dropped at fit time
+model.as_factor("rep")                        # numeric codes -> categorical
 model.set_response("yield")
-model.add_fixed("rep")
+model.add_fixed("mu + rep")
 model.add_random("genotype")
 result = model.fit()
 print(result.summary())
+print(result.variance_components())           # {'genotype': ..., 'residual': ...}
+print(result.wald_tests())
 
-# With pedigree relationship matrix
-ped = Pedigree.from_csv("pedigree.csv")
-a_inv = compute_a_inverse(ped)  # scipy.sparse compatible
-
+# Animal model with a pedigree relationship matrix
+ped = Pedigree.from_csv("examples/animal_pedigree.csv")
 model = MixedModel()
-model.load_csv("field_trial.csv")
-model.set_response("yield")
-model.add_fixed("rep")
-model.add_random("animal", ginverse=a_inv)
+model.load_csv("examples/animal_records.csv")
+model.set_response("weight")
+model.add_fixed("sex")
+model.add_random_pedigree("animal", ped)      # A-inverse with inbreeding, pedigree ordering
 result = model.fit()
-print(result.variance_components())  # {'animal': 20.5, 'residual': 40.1}
+blups = dict(zip(result.random_effect_levels()["animal"], result.random_effects()["animal"]))
+print(result.variance_components_se())        # SEs from the inverse AI matrix
+print(result.at_boundary())                   # parameters that converged to zero
+
+# Relationship matrices directly
+a_inv = compute_a_inverse(ped)                # scipy.sparse.csc_matrix (rows = ped.animal_ids())
+g = compute_g_matrix(markers_0_1_2)           # numpy (n x n)
+
+# pandas
+model = MixedModel()
+model.set_dataframe(df)                       # numeric -> float, everything else -> factor
 ```
 
 ## Quick Start (CLI)
 
 ```bash
-# Fit a model from the command line
-openblup fit --data trial.csv --response yield --fixed "rep" --random genotype
+# Fit a model from the command line (rep is numeric in the file, so mark it as a factor)
+openblup fit --data examples/field_trial.csv --response yield \
+    --fixed "mu + rep" --factor rep --random genotype
 
-# With pedigree
-openblup fit --data trial.csv --response yield --fixed "rep" \
-    --random animal --pedigree pedigree.csv
+# Animal model with pedigree: all 63 pedigree animals get a breeding value
+openblup fit --data examples/animal_records.csv --response weight \
+    --fixed sex --random animal --pedigree examples/animal_pedigree.csv \
+    --format json --blups breeding_values.csv
 
-# Inspect A-inverse
-openblup ainverse --pedigree pedigree.csv
+# Inspect the A-inverse and inbreeding coefficients
+openblup ainverse --pedigree examples/mrode_pedigree.csv --inbreeding --output ainv.csv
 ```
+
+Run `openblup fit --help` for all options (`--algorithm em`, `--max-iter`, `--tolerance`, `--pedigree-term`, ...).
 
 ## Building
 
 ```bash
-# Requires Rust 1.70+ (tested with 1.93)
+# Requires Rust 1.70+ (CI runs stable on Linux, macOS and Windows)
 cargo build --release
 
-# Run tests (295 tests)
+# Run all Rust tests (core unit tests, integration tests, CLI end-to-end tests, wasm crate)
 cargo test --workspace
 
-# Build Python bindings
-pip install maturin
-maturin develop --release
+# Lints used in CI
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
 
-# Build CLI
-cargo build --release -p openblup-cli
+# Build the CLI (binary: target/release/openblup)
+cargo build --release -p plant-breeding-lmm-cli
+
+# Build and test the Python package
+pip install maturin numpy scipy
+maturin develop --release
+python -m pytest python/tests
+
+# Build the WebAssembly demo
+rustup target add wasm32-unknown-unknown
+cargo install wasm-pack
+wasm-pack build crates/wasm --target web --out-dir www/pkg
+python3 -m http.server --directory crates/wasm/www   # then open http://localhost:8000
 ```
 
 ## Architecture
@@ -218,19 +216,23 @@ cargo build --release -p openblup-cli
 ```
 openblup/
 ├── crates/
-│   ├── core/                 # Pure Rust library (17,000+ lines)
-│   │   ├── data/             # DataFrame, Factor columns, CSV I/O
+│   ├── core/                 # Pure Rust library (plant-breeding-lmm-core)
+│   │   ├── data/             # DataFrame, Factor columns, CSV I/O (NA handling)
 │   │   ├── matrix/           # Sparse ops, dense helpers, faer Cholesky, sparse inverse
-│   │   ├── model/            # Builder API, design matrices, multi-trait
-│   │   ├── lmm/              # MME, AI-REML, EM-REML, BLUP/BLUE, structured R
+│   │   ├── model/            # Builder API, design matrices (treatment contrasts), multi-trait
+│   │   ├── lmm/              # MME, AI-REML, EM-REML, BLUP utilities, structured R
 │   │   ├── variance/         # AR1, Diagonal, Unstructured, Kronecker, Factor Analytic
 │   │   ├── genetics/         # Pedigree, A/G/H matrices, RR-BLUP, selection indices
-│   │   ├── diagnostics/      # Wald tests, residuals, cross-validation, Satterthwaite df
-│   │   └── gpu/              # Feature-gated GPU acceleration
-│   ├── python-bindings/      # PyO3 bridge with numpy/scipy interop
-│   ├── cli/                  # Command-line tool (clap)
-│   └── wasm/                 # WebAssembly target with browser demo
-└── python/                   # Python package + type stubs
+│   │   ├── diagnostics/      # Wald tests, Satterthwaite df, residuals, cross-validation
+│   │   └── gpu/              # Feature-gated GPU backend interface (CPU fallback)
+│   ├── python-bindings/      # PyO3 extension module (openblup._internal)
+│   ├── cli/                  # Command-line tool (clap) + end-to-end tests
+│   └── wasm/                 # WebAssembly target (wasm-bindgen) + browser demo
+├── python/
+│   ├── openblup/             # Python package (wrappers, type stubs)
+│   └── tests/                # Python test suite
+├── examples/                 # Example data (field trial, Mrode pedigree)
+└── .github/workflows/        # CI: fmt, clippy, tests, wasm, Python on 3 platforms
 ```
 
 ## Algorithms & References
@@ -277,15 +279,15 @@ The algorithms implemented here are based on well-established quantitative genet
 | Genomic BLUP | Yes | Yes | No | **Yes** |
 | Single-step (H) | Yes | Yes | No | **Yes** |
 | Spatial (AR1xAR1) | Yes | Yes | No | **Yes** |
-| Multi-trait | Yes | Yes | Yes | **Yes** |
+| Multi-trait | Yes | Yes | Yes | **Yes (EM-REML)** |
 | Factor analytic | Yes | Limited | No | **Yes** |
-| Sparse solver | Yes | No | Yes | **Yes (faer)** |
+| Sparse solver | Yes | No | Yes | **Partial (dense MME; sparse Cholesky not yet wired in)** |
 | Python API | No | No | No | **Yes (PyO3)** |
 | CLI tool | Yes | No | No | **Yes** |
 | Wald tests | Yes | Yes | Yes | **Yes** |
 | WebAssembly target | No | No | No | **Yes** |
 | Memory safe | No | N/A | Yes (GC) | **Yes (ownership)** |
-| Performance | Excellent | Slow | Good | **Excellent** |
+| Performance | Excellent | Slow | Good | **Good for small/medium problems (see limitations)** |
 
 ## Contributing
 
@@ -301,9 +303,9 @@ Contributions are welcome! See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the fu
 | Area | What's Needed |
 |------|---------------|
 | **Validation** | Run the same model in OpenBLUP + ASReml/sommer, compare variance components and BLUPs |
+| **Sparse MME solve** | Wire the existing sparse Cholesky / Takahashi code into the REML engines for large evaluations |
 | **Tutorials** | Worked examples from real breeding programs (dairy, wheat, maize, forestry) |
-| **Python polish** | pandas DataFrame input, better error messages, documentation |
-| **GPU backends** | wgpu compute shader implementations for G-matrix and dense solvers |
+| **GPU backends** | wgpu compute shader implementations behind the existing `gpu` feature interface |
 
 Even if you don't write code — validation reports, bug reports, and feature requests are extremely valuable. See our [issue templates](.github/ISSUE_TEMPLATE/).
 

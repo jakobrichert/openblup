@@ -85,9 +85,10 @@ cargo test --workspace
 # Run a specific test
 cargo test -p plant-breeding-lmm-core test_mrode_example
 
-# Build Python bindings (optional)
-pip install maturin
+# Build and test the Python package (optional)
+pip install maturin numpy scipy pytest
 maturin develop
+python -m pytest python/tests
 ```
 
 ### Project Structure
@@ -103,11 +104,17 @@ openblup/
 │   │   │   ├── matrix/       # Sparse/dense ops, Cholesky
 │   │   │   ├── model/        # Model builder, design matrices
 │   │   │   ├── variance/     # Variance structure trait + impls
-│   │   │   └── diagnostics/  # Wald tests, information criteria
-│   │   └── tests/            # Integration tests
-│   ├── python-bindings/      # PyO3 bridge
-│   └── cli/                  # Command-line tool
-└── python/                   # Python package + type stubs
+│   │   │   ├── diagnostics/  # Wald tests, ddf, residuals, cross-validation
+│   │   │   └── gpu/          # Feature-gated GPU backend interface
+│   │   └── tests/            # Integration tests (Mrode validation, multi-trait)
+│   ├── python-bindings/      # PyO3 bridge (openblup._internal)
+│   ├── cli/                  # Command-line tool + end-to-end tests
+│   └── wasm/                 # WebAssembly crate + browser demo
+├── python/
+│   ├── openblup/             # Python package + type stubs
+│   └── tests/                # Python tests
+├── examples/                 # Example data sets used in docs and CI
+└── .github/workflows/        # CI (fmt, clippy -D warnings, tests, wasm, Python)
 ```
 
 ## Development Workflow
@@ -126,10 +133,10 @@ openblup/
    cargo test --workspace
    ```
 
-5. **Check formatting and lints:**
+5. **Check formatting and lints** (CI fails on any warning):
    ```bash
-   cargo fmt --check
-   cargo clippy --workspace -- -W warnings
+   cargo fmt --all -- --check
+   cargo clippy --workspace --all-targets -- -D warnings
    ```
 
 6. **Open a pull request** with a clear description of what and why.
@@ -207,6 +214,11 @@ cargo test -p plant-breeding-lmm-core genetics
 
 # With output (see BLUP values, variance components)
 cargo test -p plant-breeding-lmm-core --test integration_test -- --nocapture
+
+# CLI end-to-end tests, wasm crate, Python package
+cargo test -p plant-breeding-lmm-cli
+cargo test -p openblup-wasm
+python -m pytest python/tests
 ```
 
 ## Pull Request Process
@@ -235,19 +247,18 @@ refactor: extract common Kronecker assembly into shared function
 | Area | What's Needed | Skills |
 |------|---------------|--------|
 | **Validation** | Run same models in OpenBLUP + ASReml/sommer, compare results | R + breeding knowledge |
-| **Factor Analytic models** | FA1/FA2 variance structures for MET | Rust + linear algebra |
-| **Structured residuals** | Non-identity R (spatial AR1xAR1 residual) in REML | Rust + REML theory |
-| **Sparse inverse subset** | Takahashi equations for scalability >10k animals | Rust + sparse LA |
+| **Sparse MME solve** | Wire `matrix::sparse_cholesky` / `sparse_inverse` (Takahashi) into the REML engines for >10k equations | Rust + sparse LA |
+| **Structured residuals in REML** | Fit non-identity R (spatial AR1xAR1 residual) — assembly exists, parameter updates do not | Rust + REML theory |
+| **Multi-trait AI-REML** | Replace the EM-only multi-trait engine | Rust + REML theory |
 
 ### Medium Priority
 
 | Area | What's Needed | Skills |
 |------|---------------|--------|
-| **Kenward-Roger df** | Better denominator df for Wald tests | Rust + statistics |
-| **Residual diagnostics** | Leverage, Cook's D, conditional residuals | Rust |
-| **RR-BLUP** | Ridge regression marker effects model | Rust + genomics |
+| **Kenward-Roger df** | Bias-adjusted covariance and scaled F on top of the Satterthwaite ddf | Rust + statistics |
+| **GPU backend** | `wgpu` compute shaders behind the existing `gpu` feature interface | Rust + GPU |
 | **Tutorials** | Worked examples: dairy, wheat, maize, forestry | Breeding + writing |
-| **Python API polish** | pandas DataFrame input, better error messages | Python + PyO3 |
+| **Python API polish** | Multi-trait and spatial models from Python, richer result objects | Python + PyO3 |
 
 ### Good First Issues
 
@@ -255,7 +266,7 @@ refactor: extract common Kronecker assembly into shared function
 - Improve error messages (include column names, dimensions)
 - Add `Display` trait implementations for result types
 - Write docstring examples for public functions
-- Add `serde::Serialize` to result types for JSON export
+- Expose the multi-trait builder through the CLI
 
 ## Questions?
 
