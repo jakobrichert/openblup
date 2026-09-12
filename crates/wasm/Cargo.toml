@@ -10,9 +10,11 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 nalgebra = { workspace = true }
-thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+wasm-bindgen = { workspace = true }
 
 [dev-dependencies]
 approx = { workspace = true }
+plant-breeding-lmm-core = { path = "../core" }
+sprs = { workspace = true }

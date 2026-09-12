@@ -6,10 +6,10 @@
     <title>OpenBLUP - Browser-Based Breeding Value Estimation</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: system-ui, -apple-system, sans-serif; max-width: 960px; margin: 0 auto; padding: 2rem; color: #1e293b; line-height: 1.6; }
+        body { font-family: system-ui, -apple-system, sans-serif; max-width: 960px; margin: 0 auto; padding: 2rem 1rem; color: #1e293b; line-height: 1.6; }
         h1 { font-size: 2rem; margin-bottom: 0.5rem; }
         h1 span { color: #2563eb; }
-        .subtitle { color: #64748b; margin-bottom: 2rem; }
+        .subtitle { color: #64748b; margin-bottom: 1rem; }
         h2 { font-size: 1.25rem; margin-bottom: 1rem; color: #334155; }
         .panel { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.5rem; margin: 1.5rem 0; }
         label { display: block; font-weight: 600; margin-bottom: 0.25rem; font-size: 0.9rem; }
@@ -17,8 +17,12 @@
         button { background: #2563eb; color: white; border: none; padding: 0.6rem 1.5rem; border-radius: 6px; cursor: pointer; font-size: 0.95rem; font-weight: 500; margin-top: 0.75rem; }
         button:hover { background: #1d4ed8; }
         button:active { transform: translateY(1px); }
+        button:disabled { background: #94a3b8; cursor: not-allowed; }
         pre { background: #1e293b; color: #e2e8f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; margin-top: 1rem; min-height: 80px; white-space: pre-wrap; }
         .note { font-size: 0.8rem; color: #94a3b8; margin-top: 0.5rem; }
+        #status { padding: 0.6rem 1rem; border-radius: 6px; font-size: 0.9rem; margin-bottom: 1rem; background: #fef3c7; color: #92400e; }
+        #status.ok { background: #dcfce7; color: #166534; }
+        #status.err { background: #fee2e2; color: #991b1b; }
         footer { margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid #e2e8f0; color: #94a3b8; font-size: 0.85rem; }
         footer a { color: #2563eb; text-decoration: none; }
     </style>
@@ -26,10 +30,11 @@
 <body>
     <h1>Open<span>BLUP</span></h1>
     <p class="subtitle">Browser-based breeding value estimation powered by Rust + WebAssembly</p>
+    <div id="status">Loading WebAssembly module…</div>
 
     <div class="panel">
         <h2>Pedigree A-inverse</h2>
-        <label>Pedigree (JSON array: animal, sire, dam):</label>
+        <label>Pedigree (JSON array: animal, sire, dam; "0" = unknown):</label>
         <textarea id="pedigree">[
   {"animal": "1", "sire": "0", "dam": "0"},
   {"animal": "2", "sire": "0", "dam": "0"},
@@ -37,21 +42,23 @@
   {"animal": "4", "sire": "1", "dam": "2"},
   {"animal": "5", "sire": "3", "dam": "4"}
 ]</textarea>
-        <button onclick="computeAInverse()">Compute A-inverse</button>
+        <button id="btn-ainv" disabled>Compute A-inverse</button>
         <pre id="ainv-result">Results will appear here...</pre>
+        <p class="note">Henderson (1976) rules with Meuwissen &amp; Luo (1992) inbreeding. Animal 5 is a full-sib mating (F = 0.25).</p>
     </div>
 
     <div class="panel">
         <h2>Simple Mixed Model</h2>
-        <label>Model (JSON: y, X, Z, ginv):</label>
+        <label>Model (JSON: y, x, z, ginv; rows of x and z per observation):</label>
         <textarea id="model" style="height: 160px">{
   "y": [10.0, 12.0, 8.0, 6.0, 11.0, 9.0],
   "x": [[1.0], [1.0], [1.0], [1.0], [1.0], [1.0]],
   "z": [[1,0,0],[1,0,0],[0,1,0],[0,1,0],[0,0,1],[0,0,1]],
   "ginv": null
 }</textarea>
-        <button onclick="fitModel()">Fit Model (EM-REML)</button>
+        <button id="btn-fit" disabled>Fit Model (EM-REML)</button>
         <pre id="model-result">Results will appear here...</pre>
+        <p class="note">Set "ginv" to a dense q×q matrix (e.g. the A-inverse above, ordered like its animal_ids) for an animal model.</p>
     </div>
 
     <div class="panel">
@@ -61,7 +68,7 @@
 2 1 0 1 2 0 1 2
 1 1 1 1 1 1 1 1
 0 2 1 0 1 2 0 1</textarea>
-        <button onclick="computeGMatrix()">Compute G-Matrix</button>
+        <button id="btn-g" disabled>Compute G-Matrix</button>
         <pre id="gmatrix-result">Results will appear here...</pre>
         <p class="note">VanRaden Method 1: G = ZZ' / (2 * sum(p*q))</p>
     </div>
@@ -71,26 +78,77 @@
         <p><a href="https://github.com/jakobrichert/openblup">GitHub</a> | MIT / Apache 2.0</p>
     </footer>
 
-    <script>
-        // These functions would connect to the WASM module when compiled.
-        // For now, show placeholder messages.
-        function computeAInverse() {
-            document.getElementById('ainv-result').textContent =
-                'To use this demo, compile with wasm-pack:\n\n' +
-                '  cd crates/wasm && wasm-pack build --target web\n\n' +
-                'Then serve this directory with a web server.';
+    <script type="module">
+        const status = document.getElementById('status');
+        const buildHelp =
+            'Build the module first:\n\n' +
+            '  cargo install wasm-pack\n' +
+            '  wasm-pack build crates/wasm --target web --out-dir www/pkg\n\n' +
+            'then serve crates/wasm/www with any static web server, e.g.\n' +
+            '  python3 -m http.server --directory crates/wasm/www';
+
+        function fmtMatrix(values, n, ids) {
+            const width = Math.max(8, ...(ids || []).map(s => s.length + 1));
+            let out = '';
+            if (ids) out += ' '.repeat(width) + ids.map(s => s.padStart(width)).join('') + '\n';
+            for (let i = 0; i < n; i++) {
+                const row = [];
+                for (let j = 0; j < n; j++) row.push(values[i * n + j].toFixed(4).padStart(width));
+                out += (ids ? ids[i].padStart(width) : '') + row.join('') + '\n';
+            }
+            return out;
         }
-        function fitModel() {
-            document.getElementById('model-result').textContent =
-                'To use this demo, compile with wasm-pack:\n\n' +
-                '  cd crates/wasm && wasm-pack build --target web\n\n' +
-                'Then serve this directory with a web server.';
-        }
-        function computeGMatrix() {
-            document.getElementById('gmatrix-result').textContent =
-                'To use this demo, compile with wasm-pack:\n\n' +
-                '  cd crates/wasm && wasm-pack build --target web\n\n' +
-                'Then serve this directory with a web server.';
+
+        function show(id, text) { document.getElementById(id).textContent = text; }
+
+        try {
+            const wasm = await import('./pkg/openblup_wasm.js');
+            await wasm.default();
+            status.textContent = `WebAssembly module loaded (OpenBLUP ${wasm.version()})`;
+            status.className = 'ok';
+
+            document.getElementById('btn-ainv').onclick = () => {
+                try {
+                    const r = JSON.parse(wasm.computeAInverse(document.getElementById('pedigree').value));
+                    let text = `A-inverse (${r.dim} x ${r.dim}), order: ${r.animal_ids.join(', ')}\n\n`;
+                    text += fmtMatrix(r.values, r.dim, r.animal_ids);
+                    text += '\nInbreeding coefficients:\n';
+                    r.animal_ids.forEach((id, i) => { text += `  ${id}: ${r.inbreeding[i].toFixed(4)}\n`; });
+                    show('ainv-result', text);
+                } catch (e) { show('ainv-result', 'Error: ' + e); }
+            };
+
+            document.getElementById('btn-fit').onclick = () => {
+                try {
+                    const r = JSON.parse(wasm.fitMixedModel(document.getElementById('model').value));
+                    let text = `Converged: ${r.converged} (${r.n_iterations} iterations)\n`;
+                    text += `REML log-likelihood: ${r.log_likelihood.toFixed(4)}\n\n`;
+                    text += `sigma2_random   = ${r.sigma2_random.toFixed(4)}\n`;
+                    text += `sigma2_residual = ${r.sigma2_residual.toFixed(4)}\n`;
+                    text += `heritability    = ${r.heritability.toFixed(4)}\n\n`;
+                    text += 'Fixed effects (BLUE):  ' + r.fixed_effects.map(v => v.toFixed(4)).join('  ') + '\n';
+                    text += 'Random effects (BLUP): ' + r.random_effects.map(v => v.toFixed(4)).join('  ') + '\n';
+                    show('model-result', text);
+                } catch (e) { show('model-result', 'Error: ' + e); }
+            };
+
+            document.getElementById('btn-g').onclick = () => {
+                try {
+                    const rows = document.getElementById('markers').value.trim().split('\n')
+                        .map(l => l.trim().split(/\s+/).map(Number));
+                    const n = rows.length, m = rows[0].length;
+                    if (rows.some(r => r.length !== m)) throw new Error('All rows must have the same number of markers');
+                    const flat = new Float64Array(rows.flat());
+                    const g = wasm.computeGMatrix(flat, n, m);
+                    show('gmatrix-result', `G-matrix (${n} x ${n}) from ${m} markers\n\n` + fmtMatrix(Array.from(g), n));
+                } catch (e) { show('gmatrix-result', 'Error: ' + e); }
+            };
+
+            for (const id of ['btn-ainv', 'btn-fit', 'btn-g']) document.getElementById(id).disabled = false;
+        } catch (e) {
+            status.textContent = 'WebAssembly module not found.';
+            status.className = 'err';
+            for (const id of ['ainv-result', 'model-result', 'gmatrix-result']) show(id, buildHelp);
         }
     </script>
 </body>
