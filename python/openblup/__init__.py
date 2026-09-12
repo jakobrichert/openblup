@@ -25,6 +25,25 @@ Quick start::
     model.add_random_pedigree("animal", ped)
     result = model.fit()
     print(result.variance_components())
+
+    # Multi-environment trial: factor-analytic genotype-by-environment term
+    model = MixedModel()
+    model.load_csv("met_trial.csv")
+    model.set_response("yield")
+    model.add_fixed("mu + env")
+    model.add_random_interaction("env", "genotype", outer_structure="fa1")
+    result = model.fit()
+    for p in result.variance_parameters():
+        print(p["component"], p["name"], p["value"], p["se"])
+
+    # Spatial analysis: AR1 x AR1 residual over the field grid
+    model = MixedModel()
+    model.load_csv("field_trial.csv")
+    model.set_response("yield")
+    model.add_fixed("mu + rep")
+    model.add_random("genotype")
+    model.set_residual_interaction("row", "col", "ar1", "ar1c")
+    print(model.fit().summary())
 """
 
 from __future__ import annotations
@@ -166,12 +185,15 @@ class MixedModel(_MixedModel):
         column: str,
         ginverse: Any = None,
         levels: Optional[Sequence[str]] = None,
+        structure: Optional[str] = None,
     ) -> None:
         """Add a random term; ``ginverse`` may be a scipy sparse matrix, a dense
         array or a CSC tuple. See the native docstring for details."""
         if ginverse is not None:
             ginverse = _as_csc_tuple(ginverse)
-        super().add_random(column, ginverse, None if levels is None else list(levels))
+        super().add_random(
+            column, ginverse, None if levels is None else list(levels), structure
+        )
 
 
 __all__ = [

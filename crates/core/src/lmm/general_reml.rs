@@ -1,6 +1,6 @@
 //! General AI-REML for arbitrary variance structures.
 //!
-//! This engine handles any [`VarStruct`] on the random terms (AR1, Diagonal,
+//! This engine handles any [`VarStruct`](crate::variance::VarStruct) on the random terms (AR1, Diagonal,
 //! Unstructured, FactorAnalytic, Kronecker interactions such as
 //! `FA(env) ⊗ A`) and structured residuals (AR1 ⊗ AR1 spatial models, with
 //! or without missing plots). The specialised engine in [`super::AiReml`]
@@ -427,10 +427,12 @@ impl GeneralReml {
             .collect();
 
         let mut variance_se = vec![0.0; n_params];
+        let mut ai_matrix = None;
         let variance_at_floor = (0..n_params)
             .any(|i| layout.is_variance[i] && theta[i] <= lower[i] * (1.0 + 1e-9) + 1e-300);
         if !variance_at_floor {
             let (_, ai) = self.scores_and_ai(model, &ev, &layout);
+            ai_matrix = Some(ai.clone());
             let free: Vec<usize> = (0..n_params).filter(|&i| !at_boundary[i]).collect();
             let m = free.len();
             let ai_free = DMatrix::from_fn(m, m, |a, b| ai[(free[a], free[b])]);
@@ -442,7 +444,7 @@ impl GeneralReml {
             }
         }
 
-        self.build_result(
+        let mut result = self.build_result(
             model,
             &layout,
             &ev,
@@ -451,7 +453,9 @@ impl GeneralReml {
             &at_boundary,
             history,
             converged,
-        )
+        )?;
+        result.ai_matrix = ai_matrix;
+        Ok(result)
     }
 
     /// Solve the MME at `theta` and compute the REML log-likelihood.
@@ -717,6 +721,9 @@ impl GeneralReml {
             n_obs: n,
             n_fixed_params: n_fixed,
             n_variance_params: layout.total,
+            c_inv: ev.sol.c_inv.clone(),
+            ai_matrix: None,
+            n_random_per_term: model.z_blocks.iter().map(|z| z.cols()).collect(),
         })
     }
 }

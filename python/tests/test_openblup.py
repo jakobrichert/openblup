@@ -13,6 +13,8 @@ import numpy as np
 import openblup
 from openblup import MixedModel, Pedigree, compute_a_inverse, compute_g_matrix, to_dense
 
+EXAMPLES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "examples")
+
 # Mrode (2005) Example 3.1
 MRODE_PED = [
     ("1", None, None),
@@ -199,6 +201,141 @@ class TestPackage(unittest.TestCase):
         model.add_random("genotype")
         result = model.fit()
         self.assertEqual(result.n_obs, 9)
+
+    def test_variance_parameters_and_diagnostics(self):
+        model = MixedModel()
+        model.set_data(trial_data())
+        model.as_factor("rep")
+        model.set_response("yield")
+        model.add_fixed("mu + rep")
+        model.add_random("genotype")
+        result = model.fit()
+
+        params = result.variance_parameters()
+        self.assertEqual([p["component"] for p in params], ["genotype", "residual"])
+        for p in params:
+            self.assertEqual(p["structure"], "Identity")
+            self.assertEqual(p["name"], "sigma2")
+            self.assertGreater(p["value"], 0.0)
+            self.assertGreater(p["se"], 0.0)
+            self.assertFalse(p["at_boundary"])
+        self.assertAlmostEqual(params[0]["value"], result.variance_components()["genotype"])
+
+        diag = result.residual_diagnostics()
+        self.assertIsNotNone(diag)
+        for key in ("fitted", "conditional", "marginal", "standardized", "leverage", "cooks_distance"):
+            self.assertEqual(len(diag[key]), 9)
+        np.testing.assert_allclose(diag["conditional"], result.residuals())
+        np.testing.assert_allclose(
+            diag["fitted"] + diag["conditional"], np.asarray(trial_data()["yield"])
+        )
+        self.assertTrue(np.all(diag["leverage"] >= 0.0))
+
+    def test_satterthwaite_ddf(self):
+        model = MixedModel()
+        model.set_data(trial_data())
+        model.as_factor("rep")
+        model.set_response("yield")
+        model.add_fixed("mu + rep")
+        model.add_random("genotype")
+        result = model.fit()
+
+        contain = {t["term"]: t for t in result.wald_tests()}
+        satt = {t["term"]: t for t in result.wald_tests(ddf="satterthwaite")}
+        self.assertEqual(set(satt), {"mu", "rep"})
+        for term in satt:
+            self.assertEqual(contain[term]["ddf_method"], "containment")
+            self.assertEqual(satt[term]["ddf_method"], "satterthwaite")
+            self.assertAlmostEqual(satt[term]["f_statistic"], contain[term]["f_statistic"])
+            self.assertGreater(satt[term]["den_df"], 0.0)
+            self.assertLessEqual(satt[term]["den_df"], contain[term]["den_df"] + 1e-9)
+            self.assertTrue(0.0 <= satt[term]["p_value"] <= 1.0)
+        with self.assertRaises(ValueError):
+            result.wald_tests(ddf="kenward")
+
+    def test_cross_validate(self):
+        model = MixedModel()
+        model.set_data(trial_data())
+        model.as_factor("rep")
+        model.set_response("yield")
+        model.add_fixed("mu + rep")
+        model.add_random("genotype")
+        cv = model.cross_validate(n_folds=3, seed=42)
+        self.assertEqual(cv["n_folds"], 3)
+        self.assertEqual(len(cv["folds"]), 3)
+        self.assertEqual(sum(f["n_validation"] for f in cv["folds"]), 9)
+        self.assertTrue(-1.0 <= cv["accuracy"] <= 1.0)
+        self.assertGreaterEqual(cv["msep"], 0.0)
+        self.assertGreaterEqual(cv["mae"], 0.0)
+        # Same seed -> same folds -> same result.
+        again = model.cross_validate(n_folds=3, seed=42)
+        self.assertAlmostEqual(cv["msep"], again["msep"])
+
+    def test_ar1_by_ar1_residual(self):
+        model = MixedModel()
+        model.load_csv(os.path.join(EXAMPLES, "field_trial.csv"))
+        model.as_factor("rep")
+        model.set_response("yield")
+        model.add_fixed("mu + rep")
+        model.add_random("genotype")
+        model.set_residual_interaction("row", "col", "ar1", "ar1c")
+        result = model.fit()
+
+        self.assertTrue(result.converged)
+        self.assertEqual(result.n_obs, 17)  # one missing plot
+        self.assertEqual(result.n_variance_params, 4)
+        names = [(p["component"], p["name"]) for p in result.variance_parameters()]
+        self.assertEqual(
+            names,
+            [
+                ("genotype", "sigma2"),
+                ("residual", "row.sigma2"),
+                ("residual", "row.rho"),
+                ("residual", "col.rho"),
+            ],
+        )
+        by_name = {n: v for (_, n), v in zip(names, [p["value"] for p in result.variance_parameters()])}
+        self.assertGreater(by_name["row.sigma2"], 0.0)
+        self.assertTrue(-1.0 < by_name["row.rho"] < 1.0)
+        self.assertTrue(-1.0 < by_name["col.rho"] < 1.0)
+        # Structured residuals have no leverage-based diagnostics.
+        self.assertIsNone(result.residual_diagnostics())
+        # Satterthwaite is not available here and falls back to containment.
+        self.assertEqual(result.wald_tests(ddf="satterthwaite")[0]["ddf_method"], "containment")
+
+    def test_factor_analytic_gxe(self):
+        model = MixedModel()
+        model.load_csv(os.path.join(EXAMPLES, "met_trial.csv"))
+        model.set_response("yield")
+        model.add_fixed("mu + env")
+        model.add_random_interaction("env", "genotype", outer_structure="fa1")
+        result = model.fit()
+
+        self.assertTrue(result.converged)
+        self.assertEqual(result.n_obs, 240)
+        self.assertEqual(result.n_variance_params, 9)  # 4 loadings + 4 psi + residual
+        params = result.variance_parameters()
+        loadings = [p for p in params if p["name"].startswith("env.lambda")]
+        psis = [p for p in params if p["name"].startswith("env.psi")]
+        self.assertEqual(len(loadings), 4)
+        self.assertEqual(len(psis), 4)
+        self.assertTrue(all(p["at_boundary"] is False for p in loadings))
+        self.assertTrue(all(p["value"] >= 0.0 for p in psis))
+        blups = result.random_effects()["env:genotype"]
+        levels = result.random_effect_levels()["env:genotype"]
+        self.assertEqual(len(blups), 4 * 30)
+        self.assertTrue(all(":" in lvl for lvl in levels))
+        self.assertIn("env.lambda_1_1", result.summary())
+
+    def test_structure_errors(self):
+        model = MixedModel()
+        model.set_data(trial_data())
+        with self.assertRaises(ValueError):
+            model.add_random("genotype", structure="nope")
+        ped = Pedigree.from_triples(MRODE_PED)
+        ainv = compute_a_inverse(ped, as_scipy=False)
+        with self.assertRaises(ValueError):
+            model.add_random("genotype", ginverse=ainv, levels=ped.animal_ids(), structure="ar1")
 
     def test_errors_are_value_errors(self):
         model = MixedModel()

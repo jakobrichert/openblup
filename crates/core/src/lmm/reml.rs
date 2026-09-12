@@ -394,6 +394,9 @@ impl EmReml {
             n_obs: n,
             n_fixed_params: n_fixed,
             n_variance_params: var_params.len(),
+            c_inv: sol.c_inv.clone(),
+            ai_matrix: None,
+            n_random_per_term: model.z_blocks.iter().map(|z| z.cols()).collect(),
         })
     }
 }

@@ -1,4 +1,10 @@
+use nalgebra::DMatrix;
 use serde::Serialize;
+
+use crate::diagnostics::{
+    compute_diagnostics, wald_tests_satterthwaite, ResidualDiagnostics, WaldTest,
+};
+use crate::model::MixedModel;
 
 /// The result of fitting a mixed model via REML.
 #[derive(Debug, Clone, Serialize)]
@@ -35,6 +41,18 @@ pub struct FitResult {
     pub n_obs: usize,
     pub n_fixed_params: usize,
     pub n_variance_params: usize,
+    /// Full inverse of the MME coefficient matrix at convergence
+    /// (`(p + q) x (p + q)`), used for Satterthwaite degrees of freedom and
+    /// residual diagnostics.
+    #[serde(skip)]
+    pub c_inv: Option<DMatrix<f64>>,
+    /// Average information matrix of the variance parameters at convergence
+    /// (`None` after EM-REML).
+    #[serde(skip)]
+    pub ai_matrix: Option<DMatrix<f64>>,
+    /// Number of levels of each random term (block sizes of the random part
+    /// of the MME).
+    pub n_random_per_term: Vec<usize>,
 }
 
 /// A single variance component estimate.
@@ -110,6 +128,59 @@ impl FitResult {
     /// available.
     pub fn fixed_effect_cov(&self, i: usize, j: usize) -> Option<f64> {
         self.fixed_cov.get(i).and_then(|row| row.get(j)).copied()
+    }
+
+    /// Whether every variance component is a single scaled variance
+    /// (Identity / relationship-matrix terms and an IID residual).
+    pub fn is_scaled_identity_model(&self) -> bool {
+        self.variance_components
+            .iter()
+            .all(|vc| vc.parameters.len() == 1 && vc.structure == "Identity")
+    }
+
+    /// Wald F-tests with Satterthwaite denominator degrees of freedom.
+    ///
+    /// Available for scaled-identity models fitted by AI-REML (needs the
+    /// average information matrix and `C⁻¹`); returns `None` otherwise, in
+    /// which case [`wald_tests`](crate::diagnostics::wald_tests) with
+    /// containment df applies.
+    pub fn wald_tests_satterthwaite(&self) -> Option<Vec<WaldTest>> {
+        if !self.is_scaled_identity_model() {
+            return None;
+        }
+        let c_inv = self.c_inv.as_ref()?;
+        let ai = self.ai_matrix.as_ref()?;
+        wald_tests_satterthwaite(self, c_inv, ai, &self.n_random_per_term)
+    }
+
+    /// Residual diagnostics (conditional/marginal residuals, leverage,
+    /// Cook's distance) for the model this result was fitted from. Requires
+    /// an IID residual and `C⁻¹`.
+    pub fn residual_diagnostics(&self, model: &MixedModel) -> Option<ResidualDiagnostics> {
+        let c_inv = self.c_inv.as_ref()?;
+        let residual = self.variance_components.last()?;
+        if residual.structure != "Identity" || model.residual_grid.is_some() {
+            return None;
+        }
+        let sigma2_e = residual.sigma2()?;
+        let fixed: Vec<f64> = self.fixed_effects.iter().map(|e| e.estimate).collect();
+        let random: Vec<f64> = self
+            .random_effects
+            .iter()
+            .flat_map(|b| b.effects.iter().map(|e| e.estimate))
+            .collect();
+        if fixed.len() != model.x.cols() || random.len() != model.z_combined.cols() {
+            return None;
+        }
+        Some(compute_diagnostics(
+            &model.y,
+            &model.x,
+            &model.z_combined,
+            &fixed,
+            &random,
+            c_inv,
+            sigma2_e,
+        ))
     }
 
     /// Print a formatted summary of the model fit.

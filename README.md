@@ -22,6 +22,7 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 
 ### Core Engine
 - **AI-REML** (Average Information) with exact REML scores, a likelihood safeguard and EM burn-in/fallback; parameters that reach zero are fixed at the boundary and reported as such (like ASReml's `B`)
+- **General multi-parameter REML engine**: any combination of the variance structures below, for random terms, `outer:inner` interaction terms (`Σ_outer ⊗ Σ_inner`, optionally with a pedigree inner factor) and the residual, all validated against dense reference likelihoods and numerical gradients
 - **Henderson's Mixed Model Equations** (MME) assembly and solve
 - **BLUP/BLUE** extraction with standard errors, reliabilities and the full fixed-effects covariance matrix
 - **Treatment contrasts** for factors (`mu + rep` is full rank, like R's `model.matrix`)
@@ -43,12 +44,13 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 - Full A-matrix computation and A22 extraction
 
 ### Spatial & Variance Structures
-- **AR1** (first-order autoregressive) with closed-form tridiagonal inverse
-- **Kronecker product** for separable spatial models (AR1 x AR1)
+- **AR1** (first-order autoregressive) with closed-form tridiagonal inverse, as a variance (`ar1`) or a correlation-only (`ar1c`) structure
+- **Kronecker product** for separable models: AR1 x AR1 spatial residuals over a row x column grid (missing plots allowed), FA x genotype/pedigree for genotype-by-environment
 - **Diagonal** (heterogeneous variances)
 - **Unstructured** covariance (Cholesky parameterized)
 - **Factor analytic** (FA1, FA2, ...) with Woodbury inverse (Smith et al. 2001)
-- **Identity** (IID random effects)
+- **Identity** (IID random effects) and **known** (fixed) matrices such as a pedigree A-inverse
+- Every parameter (variances, correlations, loadings, specific variances) is reported with its standard error from the inverse average-information matrix and a boundary flag
 
 ### Multi-trait Models
 - Kronecker-structured MME for correlated traits
@@ -63,11 +65,12 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 
 ### Python Package (`openblup`)
 - `MixedModel`, `Pedigree`, `FitResult` with numpy, scipy.sparse and pandas interop
+- Structured terms (`add_random(..., structure="ar1")`, `add_random_interaction("env", "genotype", "fa1")`, `set_residual_interaction("row", "col")`), Satterthwaite Wald tests, residual diagnostics and k-fold cross-validation
 - Full type stubs for IDE autocompletion
 - Install with `pip install .` (maturin)
 
 ### CLI Tool (`openblup`)
-- `openblup fit` — fit models from CSV; text or JSON output, BLUP export to CSV
+- `openblup fit` — fit models from CSV; term specs such as `--random "env:fa1*genotype"` and `--residual "row:ar1*col:ar1c"`, `--ddf satterthwaite`, `--cv K`, `--diagnostics`, text or JSON output, BLUP export to CSV
 - `openblup ainverse` — compute, inspect and export the A-inverse and inbreeding coefficients
 
 ### WebAssembly Target
@@ -79,6 +82,8 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 - The MME are assembled and solved **densely**. The sparse Cholesky and sparse-inverse-subset code in `crates/core/src/matrix` exists and is tested, but is not yet wired into the REML engines, so practical problem size is a few thousand equations.
 - The `gpu` feature compiles a backend *interface* only; all computation runs on the CPU until a `wgpu` backend is contributed.
 - Multi-trait models use EM-REML only; Kenward-Roger degrees of freedom are not implemented.
+- Satterthwaite denominator df and leverage-based residual diagnostics are available for models whose components are all single scaled variances with an IID residual (identity / relationship-matrix terms) fitted by AI-REML. For structured models the Wald tests fall back to containment df (the output says which).
+- `--cv` / `cross_validate()` handle models with a single random term (genomic or pedigree prediction).
 
 ## Quick Start (Rust)
 
@@ -156,6 +161,38 @@ blups = dict(zip(result.random_effect_levels()["animal"], result.random_effects(
 print(result.variance_components_se())        # SEs from the inverse AI matrix
 print(result.at_boundary())                   # parameters that converged to zero
 
+# Multi-environment trial: factor-analytic genotype-by-environment term
+model = MixedModel()
+model.load_csv("examples/met_trial.csv")
+model.set_response("yield")
+model.add_fixed("mu + env")
+model.add_random_interaction("env", "genotype", outer_structure="fa1")
+result = model.fit()
+for p in result.variance_parameters():        # loadings, specific variances, residual: value, se, at_boundary
+    print(p["component"], p["name"], round(p["value"], 3), round(p["se"], 3))
+
+# Spatial analysis: AR1 x AR1 residual over the field grid, genotype random
+model = MixedModel()
+model.load_csv("examples/field_trial.csv")
+model.as_factor("rep")
+model.set_response("yield")
+model.add_fixed("mu + rep")
+model.add_random("genotype")
+model.set_residual_interaction("row", "col", "ar1", "ar1c")
+print(model.fit().summary())
+
+# Satterthwaite df, residual diagnostics and cross-validation
+model = MixedModel()
+model.load_csv("examples/field_trial.csv")
+model.as_factor("rep")
+model.set_response("yield")
+model.add_fixed("mu + rep")
+model.add_random("genotype")
+result = model.fit()
+print(result.wald_tests(ddf="satterthwaite"))
+print(result.residual_diagnostics()["cooks_distance"])
+print(model.cross_validate(n_folds=5, seed=1)["accuracy"])
+
 # Relationship matrices directly
 a_inv = compute_a_inverse(ped)                # scipy.sparse.csc_matrix (rows = ped.animal_ids())
 g = compute_g_matrix(markers_0_1_2)           # numpy (n x n)
@@ -177,11 +214,28 @@ openblup fit --data examples/animal_records.csv --response weight \
     --fixed sex --random animal --pedigree examples/animal_pedigree.csv \
     --format json --blups breeding_values.csv
 
+# Multi-environment trial: FA1 genotype-by-environment interaction
+openblup fit --data examples/met_trial.csv --response yield \
+    --fixed "mu + env" --random "env:fa1*genotype"
+
+# Spatial analysis: AR1 x AR1 residual over the row x column grid
+openblup fit --data examples/field_trial.csv --response yield \
+    --fixed "mu + rep" --factor rep --random genotype --residual "row:ar1*col:ar1c"
+
+# Satterthwaite df, 5-fold cross-validation and residual diagnostics
+openblup fit --data examples/field_trial.csv --response yield \
+    --fixed "mu + rep" --factor rep --random genotype \
+    --ddf satterthwaite --cv 5 --diagnostics diagnostics.csv
+
 # Inspect the A-inverse and inbreeding coefficients
 openblup ainverse --pedigree examples/mrode_pedigree.csv --inbreeding --output ainv.csv
 ```
 
-Run `openblup fit --help` for all options (`--algorithm em`, `--max-iter`, `--tolerance`, `--pedigree-term`, ...).
+A random term is `factor[:structure]` or an interaction `factor[:structure]*factor[:structure]`
+with structures `idv` (default), `ar1`/`ar1(rho)`, `ar1c` (correlation only), `diag`, `us`,
+`fa1`, `fa2`, ... A pedigree attaches to the factor named by `--pedigree-term`
+(e.g. `--random "env:diag*animal" --pedigree ped.csv --pedigree-term animal`).
+Run `openblup fit --help` for all options (`--algorithm em`, `--max-iter`, `--tolerance`, ...).
 
 ## Building
 

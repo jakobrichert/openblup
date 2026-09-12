@@ -251,3 +251,197 @@ fn version_flag_works() {
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("openblup"));
 }
+
+fn example(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples")
+        .join(name)
+}
+
+#[test]
+fn fit_ar1_by_ar1_residual_on_field_grid() {
+    let out = openblup()
+        .args([
+            "fit",
+            "--data",
+            example("field_trial.csv").to_str().unwrap(),
+            "--response",
+            "yield",
+            "--fixed",
+            "mu + rep",
+            "--random",
+            "genotype",
+            "--residual",
+            "row:ar1*col:ar1c",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stderr: {}", stderr);
+    assert!(stderr.contains("general engine"), "{}", stderr);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["converged"], true);
+    assert_eq!(json["n_obs"], 17);
+    assert_eq!(json["n_variance_params"], 4);
+    let vc = json["variance_components"].as_array().unwrap();
+    let residual = vc.iter().find(|c| c["name"] == "residual").unwrap();
+    assert_eq!(residual["structure"], "AR1(row) x AR1corr(col)");
+    let names: Vec<&str> = residual["parameters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["row.sigma2", "row.rho", "col.rho"]);
+    for p in residual["parameters"].as_array().unwrap() {
+        let se = p["se"].as_f64().unwrap();
+        assert!(se.is_finite() && se > 0.0, "{}", p);
+        if p["name"] != "row.sigma2" {
+            let rho = p["value"].as_f64().unwrap();
+            assert!(rho.abs() < 1.0, "{}", p);
+        }
+    }
+    // Satterthwaite is not available for structured residuals -> containment.
+    assert_eq!(json["ddf_method"], "containment");
+}
+
+#[test]
+fn fit_factor_analytic_gxe_interaction() {
+    let out = openblup()
+        .args([
+            "fit",
+            "--data",
+            example("met_trial.csv").to_str().unwrap(),
+            "--response",
+            "yield",
+            "--fixed",
+            "mu + env",
+            "--random",
+            "env:fa1*genotype",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stderr: {}", stderr);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["converged"], true);
+    assert_eq!(json["n_obs"], 240);
+    // 4 loadings + 4 specific variances + residual
+    assert_eq!(json["n_variance_params"], 9);
+    let vc = json["variance_components"].as_array().unwrap();
+    let gxe = vc.iter().find(|c| c["name"] == "env:genotype").unwrap();
+    assert_eq!(gxe["structure"], "FactorAnalytic(env) x Known(genotype)");
+    let params = gxe["parameters"].as_array().unwrap();
+    assert_eq!(params.len(), 8);
+    let loadings: Vec<f64> = params
+        .iter()
+        .filter(|p| p["name"].as_str().unwrap().starts_with("env.lambda"))
+        .map(|p| p["value"].as_f64().unwrap())
+        .collect();
+    assert_eq!(loadings.len(), 4);
+    // All environments load positively on the common factor (same sign).
+    assert!(loadings.iter().all(|l| *l > 0.0), "{:?}", loadings);
+    let re = &json["random_effects"][0];
+    assert_eq!(re["term"], "env:genotype");
+    assert_eq!(re["n_levels"], 120);
+    assert!(re["effects"][0]["level"].as_str().unwrap().contains(':'));
+}
+
+#[test]
+fn fit_satterthwaite_cv_and_diagnostics() {
+    let diag = std::env::temp_dir().join(format!("openblup_diag_{}.csv", std::process::id()));
+    let out = openblup()
+        .args([
+            "fit",
+            "--data",
+            example("field_trial.csv").to_str().unwrap(),
+            "--response",
+            "yield",
+            "--fixed",
+            "mu + rep",
+            "--random",
+            "genotype",
+            "--ddf",
+            "satterthwaite",
+            "--cv",
+            "3",
+            "--cv-seed",
+            "7",
+            "--diagnostics",
+            diag.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stderr: {}", stderr);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["ddf_method"], "satterthwaite");
+    let tests = json["wald_tests"].as_array().unwrap();
+    assert_eq!(tests.len(), 2);
+    for t in tests {
+        let den = t["den_df"].as_f64().unwrap();
+        assert!(den.is_finite() && den > 0.0, "{}", t);
+        // Satterthwaite df never exceed the containment df (n - rank(X) = 14).
+        assert!(den <= 14.0 + 1e-9, "{}", t);
+    }
+    let cv = &json["cross_validation"];
+    assert_eq!(cv["n_folds"], 3);
+    assert_eq!(cv["folds"].as_array().unwrap().len(), 3);
+    let n_val: u64 = cv["folds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["n_validation"].as_u64().unwrap())
+        .sum();
+    assert_eq!(n_val, 17);
+    assert!(cv["msep"].as_f64().unwrap() >= 0.0);
+    assert!(cv["accuracy"].as_f64().unwrap() > 0.0);
+
+    let csv = std::fs::read_to_string(&diag).unwrap();
+    let lines: Vec<&str> = csv.lines().collect();
+    assert_eq!(
+        lines[0],
+        "obs,observed,fitted,residual,marginal_residual,standardized,leverage,cooks_distance"
+    );
+    assert_eq!(lines.len(), 18); // header + 17 observations with a response
+    for line in &lines[1..] {
+        let fields: Vec<f64> = line.split(',').map(|f| f.parse().unwrap()).collect();
+        assert_eq!(fields.len(), 8);
+        // observed = fitted + residual
+        assert!((fields[1] - fields[2] - fields[3]).abs() < 1e-9, "{}", line);
+        assert!(fields[6] >= 0.0 && fields[6] <= 1.0, "{}", line);
+    }
+    std::fs::remove_file(&diag).ok();
+}
+
+#[test]
+fn fit_rejects_bad_term_specs() {
+    let data = temp_file("trial.csv", TRIAL_CSV);
+    for (term, needle) in [
+        ("genotype:nope", "nope"),
+        ("genotype:fa1*rep*yield", "more than two factors"),
+        ("missing", "missing"),
+    ] {
+        let out = openblup()
+            .args([
+                "fit",
+                "--data",
+                data.to_str().unwrap(),
+                "--response",
+                "yield",
+                "--random",
+                term,
+            ])
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{} should fail", term);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(needle), "{}: {}", term, stderr);
+    }
+}

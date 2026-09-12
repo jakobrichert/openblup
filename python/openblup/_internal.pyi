@@ -72,9 +72,44 @@ class MixedModel:
         column: str,
         ginverse: Optional[SparseCSCTuple] = None,
         levels: Optional[Sequence[str]] = None,
-    ) -> None: ...
+        structure: Optional[str] = None,
+    ) -> None:
+        """Add a random term.
+
+        ``structure`` is a variance-structure spec: "idv" (default), "ar1",
+        "ar1(rho)", "ar1c" (correlation only), "diag", "us", "fa1", "fa2", ...
+        A non-identity structure cannot be combined with ``ginverse``/``levels``.
+        """
+        ...
+    def add_random_interaction(
+        self,
+        outer: str,
+        inner: str,
+        outer_structure: str = "diag",
+        inner_structure: Optional[str] = None,
+        pedigree: Optional[Pedigree] = None,
+    ) -> None:
+        """Add an ``outer:inner`` interaction with separable covariance
+        ``Sigma_outer ⊗ Sigma_inner`` (e.g. ``add_random_interaction("env",
+        "genotype", "fa1")`` for a factor-analytic G×E model). ``pedigree``
+        makes the inner factor use the pedigree relationship matrix."""
+        ...
     def add_random_pedigree(self, column: str, pedigree: Pedigree) -> None:
         """Animal-model term: levels = pedigree animals, G-inverse = A-inverse."""
+        ...
+    def set_residual(self, structure: str) -> None:
+        """Residual structure over the observations in data order ("ar1", ...)."""
+        ...
+    def set_residual_interaction(
+        self,
+        row: str,
+        col: str,
+        row_structure: str = "ar1",
+        col_structure: str = "ar1c",
+    ) -> None:
+        """Separable residual ``Sigma_row ⊗ Sigma_col`` over a grid of two
+        factor columns (every observation in a distinct cell; missing cells
+        allowed)."""
         ...
     def set_max_iterations(self, n: int) -> None: ...
     def set_convergence_tol(self, tol: float) -> None: ...
@@ -83,6 +118,10 @@ class MixedModel:
         ...
     def set_drop_missing_response(self, drop: bool) -> None: ...
     def fit(self) -> "FitResult": ...
+    def cross_validate(self, n_folds: int = 5, seed: int = 0) -> Dict[str, Any]:
+        """k-fold cross-validation of prediction accuracy for a model with a
+        single random term. Keys: n_folds, accuracy, msep, bias, mae, folds."""
+        ...
 
 class FitResult:
     """The result of fitting a mixed model via REML."""
@@ -97,7 +136,15 @@ class FitResult:
     def variance_components(self) -> Dict[str, float]: ...
     def variance_components_se(self) -> Dict[str, float]: ...
     def at_boundary(self) -> Dict[str, bool]:
-        """Variance parameters that converged to the boundary (effectively zero)."""
+        """Variance components whose first parameter converged to the boundary."""
+        ...
+    def variance_parameters(self) -> List[Dict[str, Any]]:
+        """Every variance parameter: dicts with keys component, structure, name,
+        value, se and at_boundary (e.g. sigma2 and rho for an AR1 term)."""
+        ...
+    def residual_diagnostics(self) -> Optional[Dict[str, npt.NDArray[np.float64]]]:
+        """Arrays fitted, conditional, marginal, standardized, studentized,
+        leverage and cooks_distance; None for structured residuals."""
         ...
     def fixed_effects(self) -> List[Tuple[str, str, float, float]]:
         """(term, level, estimate, se) per fixed-effect column."""
@@ -108,7 +155,11 @@ class FitResult:
     def reliabilities(self) -> Dict[str, npt.NDArray[np.float64]]: ...
     def random_effect_levels(self) -> Dict[str, List[str]]: ...
     def residuals(self) -> npt.NDArray[np.float64]: ...
-    def wald_tests(self) -> List[Dict[str, Any]]: ...
+    def wald_tests(self, ddf: str = "containment") -> List[Dict[str, Any]]:
+        """Wald F-tests per fixed term (keys term, f_statistic, num_df, den_df,
+        p_value, ddf_method). ``ddf`` is "containment" or "satterthwaite"
+        (scaled-identity AI-REML fits; otherwise falls back to containment)."""
+        ...
     def log_likelihood(self) -> float: ...
     def aic(self) -> float: ...
     def bic(self) -> float: ...

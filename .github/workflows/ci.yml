@@ -49,6 +49,13 @@ jobs:
           cargo run -q -p plant-breeding-lmm-cli -- fit \
             --data examples/animal_records.csv --response weight \
             --fixed sex --random animal --pedigree examples/animal_pedigree.csv
+          cargo run -q -p plant-breeding-lmm-cli -- fit \
+            --data examples/field_trial.csv --response yield \
+            --fixed "mu + rep" --factor rep --random genotype \
+            --residual "row:ar1*col:ar1c" --ddf satterthwaite --cv 3 > /dev/null
+          cargo run -q -p plant-breeding-lmm-cli -- fit \
+            --data examples/met_trial.csv --response yield \
+            --fixed "mu + env" --random "env:fa1*genotype" --format json > /dev/null
           cargo run -q -p plant-breeding-lmm-cli -- ainverse \
             --pedigree examples/mrode_pedigree.csv --inbreeding
 

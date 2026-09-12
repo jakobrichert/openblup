@@ -285,6 +285,7 @@ impl AiReml {
         // Average Information matrix at convergence. With a parameter on the
         // boundary the AI matrix is unreliable, so no SEs are reported.
         let mut variance_se = vec![0.0; n_params];
+        let mut ai_matrix = None;
         if !at_boundary.iter().any(|b| *b) {
             let ai = self.average_information(
                 model,
@@ -295,15 +296,16 @@ impl AiReml {
                 sigma2_e,
                 &residuals,
             );
-            if let Some(chol) = ai.cholesky() {
+            if let Some(chol) = ai.clone().cholesky() {
                 let ai_inv = chol.inverse();
                 for (i, se) in variance_se.iter_mut().enumerate() {
                     *se = ai_inv[(i, i)].abs().sqrt();
                 }
             }
+            ai_matrix = Some(ai);
         }
 
-        self.build_result(
+        let mut result = self.build_result(
             model,
             &sol,
             &mme,
@@ -312,7 +314,9 @@ impl AiReml {
             &at_boundary,
             &history,
             converged,
-        )
+        )?;
+        result.ai_matrix = ai_matrix;
+        Ok(result)
     }
 
     /// Assemble and solve the MME at the given variance parameters.
@@ -806,6 +810,9 @@ impl AiReml {
             n_obs: n,
             n_fixed_params: n_fixed,
             n_variance_params: var_params.len(),
+            c_inv: sol.c_inv.clone(),
+            ai_matrix: None,
+            n_random_per_term: model.z_blocks.iter().map(|z| z.cols()).collect(),
         })
     }
 }

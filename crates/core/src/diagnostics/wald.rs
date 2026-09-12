@@ -456,6 +456,9 @@ mod tests {
             n_obs: 10,
             n_fixed_params: 0,
             n_variance_params: 0,
+            c_inv: None,
+            ai_matrix: None,
+            n_random_per_term: vec![],
         };
 
         let tests = wald_tests(&result);
@@ -492,6 +495,9 @@ mod tests {
             n_obs: 20,
             n_fixed_params: 1,
             n_variance_params: 1,
+            c_inv: None,
+            ai_matrix: None,
+            n_random_per_term: vec![],
         };
 
         let tests = wald_tests(&result);
@@ -550,6 +556,9 @@ mod tests {
             n_obs: 30,
             n_fixed_params: 3,
             n_variance_params: 1,
+            c_inv: None,
+            ai_matrix: None,
+            n_random_per_term: vec![],
         };
 
         let tests = wald_tests(&result);
@@ -643,6 +652,9 @@ mod tests {
             n_obs: 20,
             n_fixed_params: 3,
             n_variance_params: 1,
+            c_inv: None,
+            ai_matrix: None,
+            n_random_per_term: vec![],
         };
         let tests = wald_tests(&result);
         assert_eq!(tests.len(), 2);

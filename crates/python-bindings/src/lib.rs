@@ -13,11 +13,11 @@ use pyo3::types::PyDict;
 
 use plant_breeding_lmm_core as core;
 use plant_breeding_lmm_core::data::DataFrame;
-use plant_breeding_lmm_core::diagnostics::wald_tests;
+use plant_breeding_lmm_core::diagnostics::{wald_tests, ResidualDiagnostics, WaldTest};
 use plant_breeding_lmm_core::genetics::Pedigree as CorePedigree;
 use plant_breeding_lmm_core::lmm::{reliability_from_se, FitResult as CoreFitResult};
-use plant_breeding_lmm_core::model::MixedModelBuilder;
-use plant_breeding_lmm_core::variance::Identity;
+use plant_breeding_lmm_core::model::{MixedModel, MixedModelBuilder};
+use plant_breeding_lmm_core::variance::{Identity, StructureSpec};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -251,6 +251,25 @@ struct RandomTermPy {
     ginv: Option<sprs::CsMat<f64>>,
     levels: Option<Vec<String>>,
     pedigree: Option<CorePedigree>,
+    /// Variance structure spec (None = scaled identity).
+    structure: Option<StructureSpec>,
+    /// Interaction: inner factor column and its structure spec.
+    interaction: Option<(String, Option<StructureSpec>)>,
+}
+
+/// Residual specification.
+enum ResidualPy {
+    Structure(StructureSpec),
+    Grid {
+        row: String,
+        row_structure: StructureSpec,
+        col: String,
+        col_structure: StructureSpec,
+    },
+}
+
+fn parse_structure(spec: &str) -> PyResult<StructureSpec> {
+    StructureSpec::parse(spec).map_err(to_pyerr)
 }
 
 /// A mixed model builder that accumulates data, fixed effects, and random effects,
@@ -261,6 +280,7 @@ struct PyMixedModel {
     response: Option<String>,
     fixed_formula: Option<String>,
     random_terms: Vec<RandomTermPy>,
+    residual: Option<ResidualPy>,
     max_iter: usize,
     convergence_tol: f64,
     algorithm: String,
@@ -277,6 +297,7 @@ impl PyMixedModel {
             response: None,
             fixed_formula: None,
             random_terms: Vec::new(),
+            residual: None,
             max_iter: 50,
             convergence_tol: 1e-6,
             algorithm: "ai".to_string(),
@@ -433,16 +454,34 @@ impl PyMixedModel {
     ///     the matrix has its own ordering (e.g. `Pedigree.animal_ids()`);
     ///     levels without observations are allowed. If None, the levels are
     ///     the distinct values of the column in order of first appearance.
-    #[pyo3(signature = (column, ginverse=None, levels=None))]
+    /// structure : str or None
+    ///     Variance structure: "idv" (default), "ar1", "ar1(rho)", "ar1c",
+    ///     "diag", "us", "fa1", "fa2", ... A non-identity structure cannot be
+    ///     combined with `ginverse`/`levels` (use add_random_interaction).
+    #[pyo3(signature = (column, ginverse=None, levels=None, structure=None))]
     fn add_random(
         &mut self,
         py: Python<'_>,
         column: &str,
         ginverse: Option<PyObject>,
         levels: Option<Vec<String>>,
+        structure: Option<&str>,
     ) -> PyResult<()> {
         let ginv = match ginverse {
             Some(obj) => Some(scipy_csc_to_sparse(py, &obj)?),
+            None => None,
+        };
+        let structure = match structure {
+            Some(s) => {
+                let spec = parse_structure(s)?;
+                if !spec.is_identity() && (ginv.is_some() || levels.is_some()) {
+                    return Err(PyValueError::new_err(
+                        "A relationship matrix can only be combined with the identity structure; \
+                         use add_random_interaction(..., pedigree=...) for structured genetic effects",
+                    ));
+                }
+                Some(spec)
+            }
             None => None,
         };
 
@@ -451,6 +490,87 @@ impl PyMixedModel {
             ginv,
             levels,
             pedigree: None,
+            structure,
+            interaction: None,
+        });
+        Ok(())
+    }
+
+    /// Add an interaction random term `outer:inner` with a separable
+    /// covariance `Sigma_outer ⊗ Sigma_inner`.
+    ///
+    /// Parameters
+    /// ----------
+    /// outer : str
+    ///     Outer factor column (e.g. environment), with structure
+    ///     `outer_structure` ("diag" by default; "fa1", "fa2", "us", "ar1", ...).
+    /// inner : str
+    ///     Inner factor column (e.g. genotype or animal).
+    /// inner_structure : str or None
+    ///     Structure of the inner factor; None means independent levels.
+    ///     Use a correlation-only structure ("ar1c") so the scale stays
+    ///     identifiable.
+    /// pedigree : Pedigree or None
+    ///     If given, the inner factor uses the pedigree relationship matrix
+    ///     (all pedigree animals become levels).
+    #[pyo3(signature = (outer, inner, outer_structure="diag", inner_structure=None, pedigree=None))]
+    fn add_random_interaction(
+        &mut self,
+        outer: &str,
+        inner: &str,
+        outer_structure: &str,
+        inner_structure: Option<&str>,
+        pedigree: Option<&PyPedigree>,
+    ) -> PyResult<()> {
+        let outer_spec = parse_structure(outer_structure)?;
+        let inner_spec = match inner_structure {
+            Some(s) => Some(parse_structure(s)?),
+            None => None,
+        };
+        let ped = match pedigree {
+            Some(p) => {
+                let mut ped = p.inner.clone();
+                if !ped.is_sorted() {
+                    ped.sort_pedigree().map_err(to_pyerr)?;
+                }
+                Some(ped)
+            }
+            None => None,
+        };
+        self.random_terms.push(RandomTermPy {
+            column: outer.to_string(),
+            ginv: None,
+            levels: None,
+            pedigree: ped,
+            structure: Some(outer_spec),
+            interaction: Some((inner.to_string(), inner_spec)),
+        });
+        Ok(())
+    }
+
+    /// Set the residual variance structure applied to the observations in
+    /// data order ("ar1", "ar1(rho)", ...). Default: IID.
+    fn set_residual(&mut self, structure: &str) -> PyResult<()> {
+        self.residual = Some(ResidualPy::Structure(parse_structure(structure)?));
+        Ok(())
+    }
+
+    /// Set a separable residual `Sigma_row ⊗ Sigma_col` over the grid defined
+    /// by two factor columns (e.g. field rows and columns); every observation
+    /// must occupy a distinct cell, missing plots are allowed.
+    #[pyo3(signature = (row, col, row_structure="ar1", col_structure="ar1c"))]
+    fn set_residual_interaction(
+        &mut self,
+        row: &str,
+        col: &str,
+        row_structure: &str,
+        col_structure: &str,
+    ) -> PyResult<()> {
+        self.residual = Some(ResidualPy::Grid {
+            row: row.to_string(),
+            row_structure: parse_structure(row_structure)?,
+            col: col.to_string(),
+            col_structure: parse_structure(col_structure)?,
         });
         Ok(())
     }
@@ -470,6 +590,8 @@ impl PyMixedModel {
             ginv: None,
             levels: None,
             pedigree: Some(ped),
+            structure: None,
+            interaction: None,
         });
         Ok(())
     }
@@ -511,6 +633,57 @@ impl PyMixedModel {
     /// FitResult
     ///     The fitted model results.
     fn fit(&mut self) -> PyResult<PyFitResult> {
+        let mut model = self.build_model()?;
+        let result = match self.algorithm.as_str() {
+            "em" => model.fit_em_reml(),
+            _ => model.fit_reml(),
+        }
+        .map_err(to_pyerr)?;
+        let diagnostics = result.residual_diagnostics(&model);
+        Ok(PyFitResult {
+            inner: result,
+            diagnostics,
+        })
+    }
+
+    /// k-fold cross-validation of prediction accuracy for a model with a
+    /// single random term (genomic/pedigree prediction). Returns a dict with
+    /// overall accuracy, msep, bias, mae and per-fold results.
+    #[pyo3(signature = (n_folds=5, seed=0))]
+    fn cross_validate<'py>(
+        &mut self,
+        py: Python<'py>,
+        n_folds: usize,
+        seed: u64,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let model = self.build_model()?;
+        let cv = model.cross_validate(n_folds, seed).map_err(to_pyerr)?;
+        let d = PyDict::new(py);
+        d.set_item("n_folds", cv.folds.len())?;
+        d.set_item("accuracy", cv.accuracy)?;
+        d.set_item("msep", cv.msep)?;
+        d.set_item("bias", cv.bias)?;
+        d.set_item("mae", cv.mae)?;
+        let folds: Vec<Bound<'py, PyDict>> = cv
+            .folds
+            .iter()
+            .map(|f| {
+                let fd = PyDict::new(py);
+                fd.set_item("fold", f.fold)?;
+                fd.set_item("n_validation", f.validation_indices.len())?;
+                fd.set_item("accuracy", f.accuracy)?;
+                fd.set_item("msep", f.msep)?;
+                Ok(fd)
+            })
+            .collect::<PyResult<_>>()?;
+        d.set_item("folds", folds)?;
+        Ok(d)
+    }
+}
+
+impl PyMixedModel {
+    /// Build the core model from the accumulated specification.
+    fn build_model(&self) -> PyResult<MixedModel> {
         let mut df = self.df.clone().ok_or_else(|| {
             PyValueError::new_err("No data loaded. Call set_data() or load_csv() first.")
         })?;
@@ -522,12 +695,23 @@ impl PyMixedModel {
         if self.drop_missing_response && df.has_missing(&response).map_err(to_pyerr)? {
             df = df.drop_missing(&response).map_err(to_pyerr)?;
         }
+        let mut factor_columns: Vec<&str> = Vec::new();
         for rt in &self.random_terms {
-            if df.get_factor(&rt.column).is_err() {
-                df.as_factor(&rt.column).map_err(|e| {
+            factor_columns.push(&rt.column);
+            if let Some((inner, _)) = &rt.interaction {
+                factor_columns.push(inner);
+            }
+        }
+        if let Some(ResidualPy::Grid { row, col, .. }) = &self.residual {
+            factor_columns.push(row);
+            factor_columns.push(col);
+        }
+        for col in factor_columns {
+            if df.get_factor(col).is_err() {
+                df.as_factor(col).map_err(|e| {
                     PyValueError::new_err(format!(
-                        "Random term '{}' must be a categorical column: {}",
-                        rt.column, e
+                        "Term column '{}' must be a categorical column: {}",
+                        col, e
                     ))
                 })?;
             }
@@ -544,26 +728,54 @@ impl PyMixedModel {
         }
 
         for rt in &self.random_terms {
-            builder = match (&rt.pedigree, &rt.levels) {
-                (Some(ped), _) => builder.random_pedigree(&rt.column, Identity::new(1.0), ped),
-                (None, Some(levels)) => builder.random_with_levels(
+            builder = match (&rt.interaction, &rt.pedigree, &rt.levels, &rt.structure) {
+                (Some((inner, inner_spec)), ped, _, spec) => builder.random_interaction_spec(
+                    &rt.column,
+                    spec.clone()
+                        .unwrap_or(StructureSpec::Diagonal { sigma2: 1.0 }),
+                    inner,
+                    inner_spec.clone(),
+                    ped.as_ref(),
+                ),
+                (None, Some(ped), _, _) => {
+                    builder.random_pedigree(&rt.column, Identity::new(1.0), ped)
+                }
+                (None, None, Some(levels), _) => builder.random_with_levels(
                     &rt.column,
                     Identity::new(1.0),
                     rt.ginv.clone(),
                     levels.clone(),
                 ),
-                (None, None) => builder.random(&rt.column, Identity::new(1.0), rt.ginv.clone()),
+                (None, None, None, Some(spec)) if !spec.is_identity() => {
+                    builder.random_spec(&rt.column, spec.clone(), None)
+                }
+                (None, None, None, _) => {
+                    builder.random(&rt.column, Identity::new(1.0), rt.ginv.clone())
+                }
             };
         }
 
-        let mut model = builder.build().map_err(to_pyerr)?;
-        let result = match self.algorithm.as_str() {
-            "em" => model.fit_em_reml(),
-            _ => model.fit_reml(),
+        match &self.residual {
+            Some(ResidualPy::Structure(spec)) => {
+                builder = builder.residual_spec(spec.clone());
+            }
+            Some(ResidualPy::Grid {
+                row,
+                row_structure,
+                col,
+                col_structure,
+            }) => {
+                builder = builder.residual_interaction_spec(
+                    row,
+                    row_structure.clone(),
+                    col,
+                    col_structure.clone(),
+                );
+            }
+            None => {}
         }
-        .map_err(to_pyerr)?;
 
-        Ok(PyFitResult { inner: result })
+        builder.build().map_err(to_pyerr)
     }
 }
 
@@ -575,6 +787,27 @@ impl PyMixedModel {
 #[pyclass(name = "FitResult")]
 struct PyFitResult {
     inner: CoreFitResult,
+    diagnostics: Option<ResidualDiagnostics>,
+}
+
+fn wald_to_dicts<'py>(
+    py: Python<'py>,
+    tests: &[WaldTest],
+    ddf: &str,
+) -> PyResult<Vec<Bound<'py, PyDict>>> {
+    tests
+        .iter()
+        .map(|t| {
+            let d = PyDict::new(py);
+            d.set_item("term", &t.term)?;
+            d.set_item("f_statistic", t.f_statistic)?;
+            d.set_item("num_df", t.num_df)?;
+            d.set_item("den_df", t.den_df)?;
+            d.set_item("p_value", t.p_value)?;
+            d.set_item("ddf_method", ddf)?;
+            Ok(d)
+        })
+        .collect()
 }
 
 #[pymethods]
@@ -619,14 +852,60 @@ impl PyFitResult {
     }
 
     /// Variance parameters that ended at the boundary of the parameter space
-    /// (effectively zero), as a dict of {name: bool}.
+    /// (effectively zero), as a dict of {name: bool} (first parameter of each
+    /// component; see variance_parameters() for all of them).
     fn at_boundary(&self) -> HashMap<String, bool> {
         self.inner
             .variance_components
             .iter()
-            .zip(self.inner.at_boundary.iter())
-            .map(|(vc, b)| (vc.name.clone(), *b))
+            .map(|vc| {
+                (
+                    vc.name.clone(),
+                    vc.at_boundary.first().copied().unwrap_or(false),
+                )
+            })
             .collect()
+    }
+
+    /// Every variance parameter as a list of dicts with keys component,
+    /// structure, name, value, se and at_boundary (structured models have
+    /// several parameters per component, e.g. sigma2 and rho for AR1).
+    fn variance_parameters<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let mut out = Vec::new();
+        for vc in &self.inner.variance_components {
+            for (i, (name, value)) in vc.parameters.iter().enumerate() {
+                let d = PyDict::new(py);
+                d.set_item("component", &vc.name)?;
+                d.set_item("structure", &vc.structure)?;
+                d.set_item("name", name)?;
+                d.set_item("value", value)?;
+                d.set_item("se", vc.se.get(i).copied().unwrap_or(0.0))?;
+                d.set_item(
+                    "at_boundary",
+                    vc.at_boundary.get(i).copied().unwrap_or(false),
+                )?;
+                out.push(d);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Residual diagnostics as a dict of numpy arrays (fitted, conditional,
+    /// marginal, standardized, studentized, leverage, cooks_distance), or
+    /// None for structured residuals.
+    fn residual_diagnostics<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyDict>> {
+        let diag = self.diagnostics.as_ref()?;
+        let d = PyDict::new(py);
+        let arr = |v: &Vec<f64>| PyArray1::from_vec(py, v.clone());
+        d.set_item("fitted", arr(&diag.fitted)).ok()?;
+        d.set_item("conditional", arr(&diag.conditional)).ok()?;
+        d.set_item("marginal", arr(&diag.marginal)).ok()?;
+        d.set_item("standardized", arr(&diag.standardized)).ok()?;
+        d.set_item("studentized", arr(&diag.studentized)).ok()?;
+        d.set_item("leverage", arr(&diag.leverage)).ok()?;
+        d.set_item("cooks_distance", arr(&diag.cooks_distance))
+            .ok()?;
+        Some(d)
     }
 
     /// Return the fixed effects as a list of (term, level, estimate, se) tuples.
@@ -698,20 +977,24 @@ impl PyFitResult {
     }
 
     /// Wald F-tests for the fixed-effect terms as a list of dicts with keys
-    /// term, f_statistic, num_df, den_df, p_value.
-    fn wald_tests<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        wald_tests(&self.inner)
-            .iter()
-            .map(|t| {
-                let d = PyDict::new(py);
-                d.set_item("term", &t.term)?;
-                d.set_item("f_statistic", t.f_statistic)?;
-                d.set_item("num_df", t.num_df)?;
-                d.set_item("den_df", t.den_df)?;
-                d.set_item("p_value", t.p_value)?;
-                Ok(d)
-            })
-            .collect()
+    /// term, f_statistic, num_df, den_df, p_value, ddf_method.
+    ///
+    /// `ddf` is "containment" (n - rank(X), default) or "satterthwaite"
+    /// (available for scaled-identity models fitted with AI-REML; falls back
+    /// to containment otherwise, see the ddf_method key).
+    #[pyo3(signature = (ddf="containment"))]
+    fn wald_tests<'py>(&self, py: Python<'py>, ddf: &str) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        match ddf.to_lowercase().as_str() {
+            "containment" => wald_to_dicts(py, &wald_tests(&self.inner), "containment"),
+            "satterthwaite" => match self.inner.wald_tests_satterthwaite() {
+                Some(tests) => wald_to_dicts(py, &tests, "satterthwaite"),
+                None => wald_to_dicts(py, &wald_tests(&self.inner), "containment"),
+            },
+            other => Err(PyValueError::new_err(format!(
+                "Unknown ddf method '{}'; use 'containment' or 'satterthwaite'",
+                other
+            ))),
+        }
     }
 
     /// Return the restricted log-likelihood.

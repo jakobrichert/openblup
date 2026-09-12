@@ -4,7 +4,7 @@ use crate::data::DataFrame;
 use crate::error::{LmmError, Result};
 use crate::genetics::{compute_a_inverse_with_inbreeding, Pedigree};
 use crate::types::SparseMat;
-use crate::variance::{Known, KroneckerStruct, VarStruct};
+use crate::variance::{Known, KroneckerStruct, StructureSpec, VarStruct};
 
 use super::design::{
     build_combined_random_design, build_fixed_design, build_random_design,
@@ -61,6 +61,39 @@ pub struct MixedModel {
 }
 
 impl MixedModel {
+    /// k-fold cross-validation of the prediction accuracy of a model with a
+    /// single scaled-identity / relationship-matrix random term (the genomic
+    /// or pedigree prediction setting), e.g. `y = Xb + Zu`, `u ~ N(0, σ² K)`.
+    ///
+    /// Each fold refits the variance components on the training plots with
+    /// EM-REML and predicts the held-out plots.
+    pub fn cross_validate(
+        &self,
+        n_folds: usize,
+        seed: u64,
+    ) -> Result<crate::diagnostics::CrossValResult> {
+        if self.z_blocks.len() != 1 || self.needs_general_engine() {
+            return Err(LmmError::ModelSpec(
+                "cross_validate supports models with exactly one random term (scaled identity \
+                 or relationship matrix) and an IID residual"
+                    .into(),
+            ));
+        }
+        if n_folds < 2 {
+            return Err(LmmError::ModelSpec("n_folds must be at least 2".into()));
+        }
+        crate::diagnostics::CrossValidator::new(n_folds)
+            .seed(seed)
+            .max_iter(self.max_iter.max(100))
+            .tolerance(self.convergence_tol)
+            .run(
+                &self.y,
+                &self.x,
+                &self.z_blocks[0],
+                self.ginv_matrices[0].as_ref(),
+            )
+    }
+
     /// Whether the model needs the general REML engine: any random term
     /// with a structure other than a single scaled identity/relationship
     /// matrix, or a non-IID residual.
@@ -101,18 +134,34 @@ pub struct MixedModelBuilder<'a> {
     fixed_formula: Option<String>,
     fixed_terms: Vec<FixedTerm>,
     random_terms: Vec<RandomTermSpec<'a>>,
-    residual_structure: Option<Box<dyn VarStruct>>,
+    residual_structure: Option<VarSpec>,
     residual_grid: Option<ResidualGridSpec>,
     max_iter: usize,
     convergence_tol: f64,
 }
 
+/// A variance structure that is either ready or resolved once the number of
+/// levels is known.
+enum VarSpec {
+    Ready(Box<dyn VarStruct>),
+    Deferred(StructureSpec),
+}
+
+impl VarSpec {
+    fn resolve(self, dim: usize) -> Result<Box<dyn VarStruct>> {
+        match self {
+            VarSpec::Ready(vs) => Ok(vs),
+            VarSpec::Deferred(spec) => spec.instantiate(dim),
+        }
+    }
+}
+
 /// A separable residual `Sigma_row(theta) ⊗ Sigma_col(phi)` over a grid.
 struct ResidualGridSpec {
     row_col: String,
-    row_vs: Box<dyn VarStruct>,
+    row_vs: VarSpec,
     col_col: String,
-    col_vs: Box<dyn VarStruct>,
+    col_vs: VarSpec,
 }
 
 /// Where the levels (columns of Z) of a random term come from.
@@ -131,14 +180,14 @@ enum InnerFactor<'a> {
     /// Independent levels (`Known::identity`).
     Independent,
     /// A parameterised structure (e.g. `AR1::correlation` for columns).
-    Structured(Box<dyn VarStruct>),
+    Structured(VarSpec),
     /// Pedigree relationship matrix (`Known(A⁻¹)`), levels in pedigree order.
     Pedigree(&'a Pedigree),
 }
 
 struct RandomTermSpec<'a> {
     column: String,
-    variance_structure: Box<dyn VarStruct>,
+    variance_structure: VarSpec,
     ginv: Option<SparseMat>,
     levels: RandomLevels<'a>,
     /// For interaction terms `column:inner`: the inner factor.
@@ -207,7 +256,7 @@ impl<'a> MixedModelBuilder<'a> {
     ) -> Self {
         self.random_terms.push(RandomTermSpec {
             column: column.to_string(),
-            variance_structure: Box::new(vs),
+            variance_structure: VarSpec::Ready(Box::new(vs)),
             ginv,
             levels: RandomLevels::FromData,
             interaction: None,
@@ -231,7 +280,7 @@ impl<'a> MixedModelBuilder<'a> {
     ) -> Self {
         self.random_terms.push(RandomTermSpec {
             column: column.to_string(),
-            variance_structure: Box::new(vs),
+            variance_structure: VarSpec::Ready(Box::new(vs)),
             ginv,
             levels: RandomLevels::Explicit(levels),
             interaction: None,
@@ -254,7 +303,7 @@ impl<'a> MixedModelBuilder<'a> {
     ) -> Self {
         self.random_terms.push(RandomTermSpec {
             column: column.to_string(),
-            variance_structure: Box::new(vs),
+            variance_structure: VarSpec::Ready(Box::new(vs)),
             ginv: None,
             levels: RandomLevels::Pedigree(pedigree),
             interaction: None,
@@ -277,7 +326,7 @@ impl<'a> MixedModelBuilder<'a> {
     ) -> Self {
         self.random_terms.push(RandomTermSpec {
             column: outer.to_string(),
-            variance_structure: Box::new(outer_vs),
+            variance_structure: VarSpec::Ready(Box::new(outer_vs)),
             ginv: None,
             levels: RandomLevels::FromData,
             interaction: Some((inner.to_string(), InnerFactor::Independent)),
@@ -299,12 +348,12 @@ impl<'a> MixedModelBuilder<'a> {
     ) -> Self {
         self.random_terms.push(RandomTermSpec {
             column: outer.to_string(),
-            variance_structure: Box::new(outer_vs),
+            variance_structure: VarSpec::Ready(Box::new(outer_vs)),
             ginv: None,
             levels: RandomLevels::FromData,
             interaction: Some((
                 inner.to_string(),
-                InnerFactor::Structured(Box::new(inner_vs)),
+                InnerFactor::Structured(VarSpec::Ready(Box::new(inner_vs))),
             )),
         });
         self
@@ -323,7 +372,7 @@ impl<'a> MixedModelBuilder<'a> {
     ) -> Self {
         self.random_terms.push(RandomTermSpec {
             column: outer.to_string(),
-            variance_structure: Box::new(outer_vs),
+            variance_structure: VarSpec::Ready(Box::new(outer_vs)),
             ginv: None,
             levels: RandomLevels::FromData,
             interaction: Some((inner.to_string(), InnerFactor::Pedigree(pedigree))),
@@ -338,7 +387,7 @@ impl<'a> MixedModelBuilder<'a> {
     /// FactorAnalytic) must match the number of observations; AR1 applies
     /// to the observations in data order.
     pub fn residual(mut self, vs: impl VarStruct + 'static) -> Self {
-        self.residual_structure = Some(Box::new(vs));
+        self.residual_structure = Some(VarSpec::Ready(Box::new(vs)));
         self.residual_grid = None;
         self
     }
@@ -361,9 +410,91 @@ impl<'a> MixedModelBuilder<'a> {
         self.residual_structure = None;
         self.residual_grid = Some(ResidualGridSpec {
             row_col: row.to_string(),
-            row_vs: Box::new(row_vs),
+            row_vs: VarSpec::Ready(Box::new(row_vs)),
             col_col: col.to_string(),
-            col_vs: Box::new(col_vs),
+            col_vs: VarSpec::Ready(Box::new(col_vs)),
+        });
+        self
+    }
+
+    // ---- specification-based variants (used by the CLI and Python) ----
+
+    /// Add a random term with a structure given as a [`StructureSpec`]
+    /// (e.g. parsed from `"ar1(0.3)"`); the dimension is resolved at build
+    /// time. An optional pedigree turns an identity spec into an animal-model
+    /// term (see [`random_pedigree`](Self::random_pedigree)).
+    pub fn random_spec(
+        mut self,
+        column: &str,
+        spec: StructureSpec,
+        pedigree: Option<&'a Pedigree>,
+    ) -> Self {
+        let levels = match pedigree {
+            Some(ped) => RandomLevels::Pedigree(ped),
+            None => RandomLevels::FromData,
+        };
+        self.random_terms.push(RandomTermSpec {
+            column: column.to_string(),
+            variance_structure: VarSpec::Deferred(spec),
+            ginv: None,
+            levels,
+            interaction: None,
+        });
+        self
+    }
+
+    /// Add an interaction term `outer:inner` from specifications. `inner_spec`
+    /// `None` means independent inner levels; a pedigree makes the inner
+    /// factor an animal factor with `A` as its covariance (its spec is then
+    /// ignored).
+    pub fn random_interaction_spec(
+        mut self,
+        outer: &str,
+        outer_spec: StructureSpec,
+        inner: &str,
+        inner_spec: Option<StructureSpec>,
+        pedigree: Option<&'a Pedigree>,
+    ) -> Self {
+        let inner_factor = match (pedigree, inner_spec) {
+            (Some(ped), _) => InnerFactor::Pedigree(ped),
+            (None, Some(spec)) if !spec.is_identity() && spec != StructureSpec::Known => {
+                InnerFactor::Structured(VarSpec::Deferred(spec))
+            }
+            _ => InnerFactor::Independent,
+        };
+        self.random_terms.push(RandomTermSpec {
+            column: outer.to_string(),
+            variance_structure: VarSpec::Deferred(outer_spec),
+            ginv: None,
+            levels: RandomLevels::FromData,
+            interaction: Some((inner.to_string(), inner_factor)),
+        });
+        self
+    }
+
+    /// Set the residual structure from a specification (applied to the
+    /// observations in data order).
+    pub fn residual_spec(mut self, spec: StructureSpec) -> Self {
+        self.residual_structure = Some(VarSpec::Deferred(spec));
+        self.residual_grid = None;
+        self
+    }
+
+    /// Set a separable residual over a `row x col` grid from specifications,
+    /// e.g. `("row", ar1, "col", ar1c)`.
+    pub fn residual_interaction_spec(
+        mut self,
+        row: &str,
+        row_spec: StructureSpec,
+        col: &str,
+        col_spec: StructureSpec,
+    ) -> Self {
+        self.residual_structure = None;
+        self.residual_grid = Some(ResidualGridSpec {
+            row_col: row.to_string(),
+            row_vs: VarSpec::Deferred(row_spec),
+            col_col: col.to_string(),
+            col_vs: VarSpec::Deferred(col_spec),
         });
         self
     }
@@ -451,7 +582,8 @@ impl<'a> MixedModelBuilder<'a> {
                             .iter()
                             .map(|s| s.to_string())
                             .collect();
-                        (levels, vs)
+                        let q = levels.len();
+                        (levels, vs.resolve(q)?)
                     }
                     InnerFactor::Pedigree(ped) => {
                         let sorted;
@@ -477,8 +609,9 @@ impl<'a> MixedModelBuilder<'a> {
                     &inner_col,
                     &inner_levels,
                 )?;
+                let outer_vs = rt.variance_structure.resolve(outer_levels.len())?;
                 let vs = KroneckerStruct::new(
-                    rt.variance_structure,
+                    outer_vs,
                     outer_levels.len(),
                     inner_vs,
                     inner_levels.len(),
@@ -493,27 +626,28 @@ impl<'a> MixedModelBuilder<'a> {
                 continue;
             }
 
-            if let Some(d) = rt.variance_structure.fixed_dim() {
-                let q = match &rt.levels {
-                    RandomLevels::FromData => df.factor_view(&rt.column)?.n_levels(),
-                    RandomLevels::Explicit(levels) => levels.len(),
-                    RandomLevels::Pedigree(ped) => ped.n_animals(),
-                };
-                if d != q {
+            let q_term = match &rt.levels {
+                RandomLevels::FromData => df.factor_view(&rt.column)?.n_levels(),
+                RandomLevels::Explicit(levels) => levels.len(),
+                RandomLevels::Pedigree(ped) => ped.n_animals(),
+            };
+            let variance_structure = rt.variance_structure.resolve(q_term)?;
+            if let Some(d) = variance_structure.fixed_dim() {
+                if d != q_term {
                     return Err(LmmError::DimensionMismatch {
-                        expected: q,
+                        expected: q_term,
                         got: d,
                         context: format!(
                             "{} structure for '{}' is defined for {} levels but the term has {}",
-                            rt.variance_structure.name(),
+                            variance_structure.name(),
                             rt.column,
                             d,
-                            q
+                            q_term
                         ),
                     });
                 }
             }
-            if rt.variance_structure.name() != "Identity"
+            if variance_structure.name() != "Identity"
                 && (rt.ginv.is_some() || matches!(rt.levels, RandomLevels::Pedigree(_)))
             {
                 return Err(LmmError::ModelSpec(format!(
@@ -572,7 +706,7 @@ impl<'a> MixedModelBuilder<'a> {
 
             z_blocks.push(z);
             random_level_names.push(levels);
-            random_var_structs.push(rt.variance_structure);
+            random_var_structs.push(variance_structure);
             ginv_matrices.push(ginv);
             random_term_names.push(rt.column);
         }
@@ -605,10 +739,12 @@ impl<'a> MixedModelBuilder<'a> {
                         }
                         cell_index.push(cell);
                     }
+                    let row_vs = spec.row_vs.resolve(row_levels.len())?;
+                    let col_vs = spec.col_vs.resolve(n_cols)?;
                     let vs = KroneckerStruct::new(
-                        spec.row_vs,
+                        row_vs,
                         row_levels.len(),
-                        spec.col_vs,
+                        col_vs,
                         n_cols,
                         &spec.row_col,
                         &spec.col_col,
@@ -622,6 +758,7 @@ impl<'a> MixedModelBuilder<'a> {
                     (Box::new(vs), Some(grid))
                 }
                 (Some(vs), None) => {
+                    let vs = vs.resolve(n)?;
                     if let Some(d) = vs.fixed_dim() {
                         if d != n {
                             return Err(LmmError::DimensionMismatch {

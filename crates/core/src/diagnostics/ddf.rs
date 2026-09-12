@@ -757,6 +757,9 @@ mod tests {
             n_obs,
             n_fixed_params: p,
             n_variance_params: 2,
+            c_inv: None,
+            ai_matrix: None,
+            n_random_per_term: vec![],
         };
 
         let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
@@ -798,6 +801,9 @@ mod tests {
             n_obs: 10,
             n_fixed_params: 0,
             n_variance_params: 0,
+            c_inv: None,
+            ai_matrix: None,
+            n_random_per_term: vec![],
         };
 
         let c_inv = DMatrix::zeros(0, 0);
@@ -983,6 +989,9 @@ mod tests {
             n_obs,
             n_fixed_params: p,
             n_variance_params: 2,
+            c_inv: None,
+            ai_matrix: None,
+            n_random_per_term: vec![],
         };
 
         let c_inv = make_simple_c_inv(p, q, sigma2_e, sigma2_u);
