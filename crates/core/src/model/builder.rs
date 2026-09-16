@@ -4,7 +4,7 @@ use crate::data::DataFrame;
 use crate::error::{LmmError, Result};
 use crate::genetics::{compute_a_inverse_with_inbreeding, Pedigree};
 use crate::types::SparseMat;
-use crate::variance::{Known, KroneckerStruct, StructureSpec, VarStruct};
+use crate::variance::{Known, KroneckerStruct, Relationship, StructureSpec, VarStruct};
 
 use super::design::{
     build_combined_random_design, build_fixed_design, build_random_design,
@@ -703,6 +703,16 @@ impl<'a> MixedModelBuilder<'a> {
                     });
                 }
             }
+
+            // A relationship matrix travels with the variance structure too,
+            // so the general engine (which only sees the structures) uses it.
+            let variance_structure: Box<dyn VarStruct> = match &ginv {
+                Some(k_inv) => Box::new(Relationship::new(
+                    variance_structure.params()[0],
+                    k_inv.clone(),
+                )?),
+                None => variance_structure,
+            };
 
             z_blocks.push(z);
             random_level_names.push(levels);

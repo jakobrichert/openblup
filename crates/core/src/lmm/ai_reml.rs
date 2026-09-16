@@ -415,7 +415,10 @@ impl AiReml {
         let log_det_g: f64 = sigma2_random
             .iter()
             .enumerate()
-            .map(|(k, s)| model.z_blocks[k].cols() as f64 * s.ln())
+            .map(|(k, s)| {
+                model.z_blocks[k].cols() as f64 * s.ln()
+                    + model.random_var_structs[k].relationship_log_det()
+            })
             .sum();
         let log_2_pi = (2.0 * std::f64::consts::PI).ln();
         -0.5 * (n_eff * log_2_pi + log_det_r + log_det_g + sol.log_det_c + y_p_y)

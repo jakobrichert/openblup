@@ -183,7 +183,8 @@ impl EmReml {
             let mut log_det_g = 0.0;
             for k in 0..n_random_terms {
                 let q = model.z_blocks[k].cols();
-                log_det_g += q as f64 * old_sigma2_random[k].ln();
+                log_det_g += q as f64 * old_sigma2_random[k].ln()
+                    + model.random_var_structs[k].relationship_log_det();
             }
             let log_2_pi = (2.0 * std::f64::consts::PI).ln();
             let logl = -0.5 * (n_eff * log_2_pi + log_det_r + log_det_g + sol.log_det_c + y_p_y);
