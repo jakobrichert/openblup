@@ -81,6 +81,7 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 - The complete engine compiled to WebAssembly (`crates/studio`), running in a Web Worker
 - Point-and-click model builder with the CLI's term vocabulary, built-in example analyses, CSV and pedigree upload
 - Variance components, BLUEs and Wald tests, ranked BLUPs / EBVs, residual diagnostics, spatial field maps, FA genetic correlations and reaction norms, convergence and cross-validation views
+- Interactive 3D: the REML likelihood landscape with the optimizer path, the spatial field trend, the pedigree and G×E reaction norms, with PNG export and 1080p clip recording
 - Shows every model as the equivalent CLI command and Python code; see [OpenBLUP Studio](#openblup-studio) below
 
 ### WebAssembly Target
@@ -104,6 +105,17 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 | ![G×E view](docs/images/studio-gxe.png) | ![Breeding values view](docs/images/studio-breeding-values.png) |
 
 ![Model builder with the equivalent CLI command](docs/images/studio-model.png)
+
+### 3D views
+
+The **3D** tab renders the fit itself, not decoration:
+
+| REML likelihood landscape | Spatial field trend | Pedigree |
+|---|---|---|
+| ![REML likelihood surface with the AI-REML path](docs/images/studio-3d-likelihood.jpg) | ![AR1 x AR1 field trend as a terrain](docs/images/studio-3d-field.jpg) | ![Pedigree coloured by breeding value](docs/images/studio-3d-pedigree.jpg) |
+| The restricted log-likelihood over any two variance parameters, evaluated by the engine, with the AI-REML iterations climbing to the maximum and the 95 % joint confidence region | Plots as columns on the field, the fitted AR1 x AR1 residual as a terrain, and the yields with that trend removed, animated between the three | Generations as rings, parent–offspring links and breeding values; hovering an animal traces its ancestors and descendants |
+
+Multi-environment trials also get 3D genotype-by-environment reaction norms. Every 3D view can be exported as a PNG or recorded as a 1080p clip of one full orbit.
 
 - Start from one of the built-in analyses (spatial field trial, multi-environment trial, pedigree animal model, RCBD) or drop in your own CSV and pedigree
 - Pick the response, fixed effects, random terms with a variance structure per factor (`idv`, `diag`, `us`, `fa1`–`fa3`, `ar1`, `ar1c`), interactions, a pedigree term and an IID, AR1 x AR1 or custom residual
