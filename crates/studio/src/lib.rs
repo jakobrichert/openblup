@@ -54,6 +54,42 @@ pub fn fit(request: &str) -> Result<String, JsError> {
         .map_err(|e| JsError::new(&e))
 }
 
+/// The REML log-likelihood over a grid of two variance parameters (all other
+/// parameters fixed at `theta`), plus the fit's iterates projected onto that
+/// slice. Takes the fit request and a JSON [`SurfaceRequest`].
+#[wasm_bindgen]
+pub fn likelihood_surface(request: &str, surface: &str) -> Result<String, JsError> {
+    let request: FitRequest =
+        serde_json::from_str(request).map_err(|e| JsError::new(&format!("Bad request: {}", e)))?;
+    let surface: SurfaceRequest =
+        serde_json::from_str(surface).map_err(|e| JsError::new(&format!("Bad surface: {}", e)))?;
+    surface_value(&request, &surface)
+        .map(|v| v.to_string())
+        .map_err(|e| JsError::new(&e))
+}
+
+/// A likelihood-surface request.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SurfaceRequest {
+    /// Fitted parameters (flattened `variance_components`).
+    pub theta: Vec<f64>,
+    /// Their standard errors (0 or missing when unavailable).
+    #[serde(default)]
+    pub se: Vec<f64>,
+    /// Indices of the two parameters to vary.
+    pub params: [usize; 2],
+    /// Grid points per axis.
+    #[serde(default = "default_grid")]
+    pub n: usize,
+    /// Parameter vectors of the iterations to project onto the slice.
+    #[serde(default)]
+    pub path: Vec<Vec<f64>>,
+}
+
+fn default_grid() -> usize {
+    25
+}
+
 /// REML algorithm.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -368,6 +404,146 @@ pub fn fit_value(request: &FitRequest) -> Result<Value, String> {
     }))
 }
 
+/// Native form of [`likelihood_surface`].
+pub fn surface_value(request: &FitRequest, surface: &SurfaceRequest) -> Result<Value, String> {
+    let df = DataFrame::from_csv_reader(request.data.as_bytes())
+        .map_err(|e| format!("Could not read the data: {}", e))?;
+    let pedigree = match &request.pedigree {
+        Some(csv) => Some(load_pedigree(csv)?),
+        None => None,
+    };
+    let mut model = request
+        .spec
+        .prepare(&df, pedigree.as_ref())
+        .map_err(|e| e.to_string())?
+        .model;
+
+    let mut names = Vec::new();
+    let mut bounds = Vec::new();
+    for (term, vs) in model
+        .random_term_names
+        .iter()
+        .zip(&model.random_var_structs)
+    {
+        names.extend(
+            vs.param_names()
+                .into_iter()
+                .map(|p| format!("{} {}", term, p)),
+        );
+        bounds.extend(vs.bounds());
+    }
+    let res = &model.residual_var_struct;
+    names.extend(
+        res.param_names()
+            .into_iter()
+            .map(|p| format!("residual {}", p)),
+    );
+    bounds.extend(res.bounds());
+
+    let theta = &surface.theta;
+    if theta.len() != names.len() {
+        return Err(format!(
+            "The model has {} variance parameters but {} were given",
+            names.len(),
+            theta.len()
+        ));
+    }
+    let [pa, pb] = surface.params;
+    if pa == pb || pa >= theta.len() || pb >= theta.len() {
+        return Err("Choose two different variance parameters".into());
+    }
+    let n = surface.n.clamp(5, 81);
+    let se = |i: usize| {
+        surface
+            .se
+            .get(i)
+            .copied()
+            .filter(|s| s.is_finite() && *s > 0.0)
+    };
+
+    // Axis ranges: about +-3 SE around the estimate, stretched to take in the
+    // iterates (up to a limit) and kept strictly inside the parameter space.
+    let axis = |i: usize| -> (f64, f64) {
+        let v = theta[i];
+        let (lo, hi) = bounds[i];
+        let spread = se(i)
+            .map(|s| 3.0 * s)
+            .unwrap_or(0.75 * v.abs())
+            .max(0.05 * v.abs())
+            .max(1e-6);
+        let (mut a, mut b) = (v - spread, v + spread);
+        for p in &surface.path {
+            if let Some(&x) = p.get(i) {
+                a = a.min(x.max(v - 2.5 * spread));
+                b = b.max(x.min(v + 2.5 * spread));
+            }
+        }
+        let width = if hi.is_finite() && lo.is_finite() {
+            hi - lo
+        } else {
+            1.0
+        };
+        if lo.is_finite() {
+            let floor = if (0.0..1e-6).contains(&lo) && v > 0.0 {
+                (v * 0.02).max(lo)
+            } else {
+                lo + 1e-3 * width
+            };
+            a = a.max(floor.min(v));
+        }
+        if hi.is_finite() {
+            b = b.min((hi - 1e-3 * width).max(v));
+        }
+        if b <= a {
+            b = a + spread;
+        }
+        (a, b)
+    };
+    let (ra, rb) = (axis(pa), axis(pb));
+    let grid = |(lo, hi): (f64, f64)| -> Vec<f64> {
+        (0..n)
+            .map(|k| lo + (hi - lo) * k as f64 / (n - 1) as f64)
+            .collect()
+    };
+    let (a_values, b_values) = (grid(ra), grid(rb));
+
+    let engine = AiReml::new(request.spec.max_iter, request.spec.tolerance);
+    let mut eval = |a: f64, b: f64| -> Option<f64> {
+        let mut t = theta.clone();
+        t[pa] = a;
+        t[pb] = b;
+        engine
+            .log_likelihood_at(&mut model, &t)
+            .ok()
+            .filter(|l| l.is_finite())
+    };
+    let logl: Vec<Vec<Option<f64>>> = b_values
+        .iter()
+        .map(|&b| a_values.iter().map(|&a| eval(a, b)).collect())
+        .collect();
+    let estimate = eval(theta[pa], theta[pb]);
+    let path: Vec<Value> = surface
+        .path
+        .iter()
+        .enumerate()
+        .filter_map(|(k, p)| {
+            let (a, b) = (*p.get(pa)?, *p.get(pb)?);
+            eval(a, b).map(|l| json!({ "iteration": k + 1, "a": a, "b": b, "logl": l }))
+        })
+        .collect();
+
+    Ok(json!({
+        "names": names,
+        "params": [pa, pb],
+        "a": a_values,
+        "b": b_values,
+        "logl": logl,
+        "estimate": { "a": theta[pa], "b": theta[pb], "logl": estimate },
+        "path": path,
+        "slice": theta.len() > 2,
+    }))
+}
+
 fn load_pedigree(csv: &str) -> Result<Pedigree, String> {
     let mut ped = Pedigree::from_csv_reader(csv.as_bytes())
         .map_err(|e| format!("Could not read the pedigree: {}", e))?;
@@ -668,6 +844,77 @@ mod tests {
             .as_f64()
             .unwrap();
         assert!((s2a - 36.54).abs() < 0.01, "{}", s2a);
+    }
+
+    #[test]
+    fn likelihood_surface_peaks_at_the_estimate() {
+        let req = request(
+            &example("field_trial.csv"),
+            r#"{"response": "yield", "fixed": "mu + rep", "factors": ["rep"], "random": ["genotype"]}"#,
+        );
+        let fit = fit_value(&req).unwrap();
+        let theta: Vec<f64> = fit["fit"]["variance_components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|c| {
+                c["parameters"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| p[1].as_f64().unwrap())
+            })
+            .collect();
+        let se: Vec<f64> = fit["fit"]["variance_se"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+        let path: Vec<Vec<f64>> = fit["fit"]["history"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| serde_json::from_value(h["variance_params"].clone()).unwrap())
+            .collect();
+        let surface = SurfaceRequest {
+            theta: theta.clone(),
+            se,
+            params: [0, 1],
+            n: 15,
+            path,
+        };
+        let v = surface_value(&req, &surface).unwrap();
+        assert_eq!(v["names"][0], "genotype sigma2");
+        assert_eq!(v["names"][1], "residual sigma2");
+        assert_eq!(v["a"].as_array().unwrap().len(), 15);
+        let best = v["estimate"]["logl"].as_f64().unwrap();
+        let reported = fit["fit"]["log_likelihood"].as_f64().unwrap();
+        assert!(
+            (best - reported).abs() < 1e-8 * best.abs(),
+            "{} vs {}",
+            best,
+            reported
+        );
+        let cells: Vec<f64> = v["logl"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|row| row.as_array().unwrap().iter().filter_map(|x| x.as_f64()))
+            .collect();
+        assert!(cells.len() > 200);
+        assert!(
+            cells.iter().all(|&l| l <= best + 1e-9),
+            "grid exceeds the REML maximum"
+        );
+        assert!(!v["path"].as_array().unwrap().is_empty());
+        assert_eq!(v["slice"], false);
+
+        let bad = SurfaceRequest {
+            params: [0, 0],
+            ..surface
+        };
+        assert!(surface_value(&req, &bad).is_err());
     }
 
     #[test]
