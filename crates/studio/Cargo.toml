@@ -1,0 +1,21 @@
+[package]
+name = "openblup-studio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "WebAssembly build of the full OpenBLUP engine for OpenBLUP Studio (browser UI)"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+plant-breeding-lmm-core = { path = "../core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+wasm-bindgen = { workspace = true }
+
+# `rand` (cross-validation folds) needs the browser's crypto API on wasm.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
