@@ -352,13 +352,10 @@ mod tests {
         {
             assert_relative_eq!(*a, b.estimate, max_relative = 1e-4);
         }
-        // Both report the same REML log-likelihood up to the log|K⁻¹|
-        // constant the core engine omits.
-        let l = kinv.clone().cholesky().unwrap();
-        let log_det_kinv = 2.0 * (0..3).map(|i| l.l()[(i, i)].ln()).sum::<f64>();
+        // Both report the exact REML log-likelihood, including log|K|.
         assert_relative_eq!(
             wasm_fit.log_likelihood,
-            core_fit.log_likelihood + 0.5 * log_det_kinv,
+            core_fit.log_likelihood,
             max_relative = 1e-6
         );
     }

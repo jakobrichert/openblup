@@ -385,6 +385,92 @@ fn two_generation_pedigree(n_founders: usize, n_offspring: usize) -> Pedigree {
     ped
 }
 
+/// A pedigree animal model must give the same fit in the general engine
+/// (which is used as soon as the residual or another term is structured) as in
+/// the sparse engine: the relationship matrix travels with the variance
+/// structure, and both report the exact REML log-likelihood including log|A|.
+#[test]
+fn general_engine_uses_the_pedigree_relationship_matrix() {
+    let mut rng = rand::rngs::StdRng::seed_from_u64(11);
+    let ped = two_generation_pedigree(12, 48);
+    let n_anim = ped.n_animals();
+    let mut bv = vec![0.0; n_anim];
+    for i in 0..n_anim {
+        bv[i] = match (ped.sire(i), ped.dam(i)) {
+            (Some(s), Some(d)) => 0.5 * (bv[s] + bv[d]) + (0.5f64 * 4.0).sqrt() * normal(&mut rng),
+            _ => 2.0 * normal(&mut rng),
+        };
+    }
+    let mut y = Vec::new();
+    let mut animal = Vec::new();
+    for i in 0..n_anim {
+        let id = ped.animal_id(i);
+        if id.starts_with('O') {
+            y.push(20.0 + bv[i] + 1.5 * normal(&mut rng));
+            animal.push(id.to_string());
+        }
+    }
+    let mut df = DataFrame::new();
+    df.add_float_column("y", y).unwrap();
+    let refs: Vec<&str> = animal.iter().map(|s| s.as_str()).collect();
+    df.add_factor_column("animal", &refs).unwrap();
+
+    let build = || {
+        MixedModelBuilder::new()
+            .data(&df)
+            .response("y")
+            .fixed("mu")
+            .random_pedigree("animal", Identity::new(1.0), &ped)
+            .build()
+            .unwrap()
+    };
+    let mut sparse_model = build();
+    let sparse = AiReml::new(100, 1e-10).fit(&mut sparse_model).unwrap();
+    let mut general_model = build();
+    let general = GeneralReml::new(100, 1e-10)
+        .fit(&mut general_model)
+        .unwrap();
+    assert!(sparse.converged && general.converged);
+
+    for (a, b) in result_theta(&sparse)
+        .iter()
+        .zip(result_theta(&general).iter())
+    {
+        assert!((a - b).abs() < 1e-5 * a.abs(), "{} vs {}", a, b);
+    }
+    assert!(
+        (sparse.log_likelihood - general.log_likelihood).abs() < 1e-6,
+        "sparse {} vs general {}",
+        sparse.log_likelihood,
+        general.log_likelihood
+    );
+    // All 60 animals get breeding values, founders included, and they agree.
+    let (bs, bg) = (
+        &sparse.random_effects[0].effects,
+        &general.random_effects[0].effects,
+    );
+    assert_eq!(bs.len(), n_anim);
+    for (s, g) in bs.iter().zip(bg.iter()) {
+        assert_eq!(s.level, g.level);
+        assert!(
+            (s.estimate - g.estimate).abs() < 1e-5,
+            "{}: {} vs {}",
+            s.level,
+            s.estimate,
+            g.estimate
+        );
+    }
+    assert!(bg
+        .iter()
+        .filter(|e| e.level.starts_with('F'))
+        .any(|e| e.estimate.abs() > 1e-6));
+
+    // Both match the exact dense likelihood (V = σ²_a Z A Z' + σ²_e I).
+    assert_at_optimum(&mut general_model, &general, 1e-3);
+    let dense = dense_reml_logl(&mut sparse_model, &result_theta(&sparse));
+    assert!((dense - sparse.log_likelihood).abs() < 1e-6 * dense.abs());
+}
+
 /// FA1(env) ⊗ A: factor analytic genotype-by-environment effects with a
 /// pedigree relationship matrix. Founders have no records.
 #[test]

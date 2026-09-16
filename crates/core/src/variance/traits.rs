@@ -32,6 +32,14 @@ pub trait VarStruct: Send + Sync + std::fmt::Debug {
     /// Compute log|Sigma| (the log-determinant).
     fn log_determinant(&self, dim: usize) -> f64;
 
+    /// `log|K|` of a known relationship matrix carried by this structure
+    /// (`Sigma = sigma^2 K`), or 0 when there is none. It is part of
+    /// [`log_determinant`](Self::log_determinant); engines that work with the
+    /// scale parameters directly add it themselves.
+    fn relationship_log_det(&self) -> f64 {
+        0.0
+    }
+
     /// Compute dSigma^{-1}/d(theta_k) for each parameter.
     /// Returns one sparse matrix per parameter.
     fn derivatives_of_inverse(&self, dim: usize) -> Vec<SparseMat>;
