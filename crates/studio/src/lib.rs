@@ -315,6 +315,9 @@ pub fn fit_value(request: &FitRequest) -> Result<Value, String> {
                 "max_inbreeding": f.iter().cloned().fold(0.0_f64, f64::max),
                 "n_inbred": f.iter().filter(|&&x| x > 1e-12).count(),
                 "ids": (0..ped.n_animals()).map(|i| ped.animal_id(i)).collect::<Vec<_>>(),
+                // Parent indices into `ids` (null = unknown), for drawing the pedigree.
+                "sire": (0..ped.n_animals()).map(|i| ped.sire(i)).collect::<Vec<_>>(),
+                "dam": (0..ped.n_animals()).map(|i| ped.dam(i)).collect::<Vec<_>>(),
                 "inbreeding": f,
             }))
         }
