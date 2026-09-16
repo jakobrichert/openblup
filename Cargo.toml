@@ -18,7 +18,7 @@ authors = ["Jakob"]
 # Core math
 nalgebra = "0.35"
 # Sparse Cholesky (faer)
-faer = "0.20"
+faer = "0.24"
 # Sparse matrices
 sprs = "0.11"
 # Data I/O
