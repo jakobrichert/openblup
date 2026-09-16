@@ -23,8 +23,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      # The workspace builds the PyO3 bindings, and PyO3 0.23 supports
-      # Python <= 3.13; don't depend on the runner's default interpreter.
+      # The workspace builds the PyO3 bindings; build them against a fixed
+      # interpreter rather than whatever the runner image defaults to.
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -87,7 +87,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.12"]
+        python-version: ["3.9", "3.12", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

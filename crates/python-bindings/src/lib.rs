@@ -30,7 +30,7 @@ fn to_pyerr(e: core::LmmError) -> PyErr {
 
 /// Convert a sparse CSC matrix into the (data, indices, indptr, shape) tuple
 /// that Python/scipy expects for constructing a `csc_matrix`.
-fn sparse_to_scipy_csc(py: Python<'_>, mat: &sprs::CsMat<f64>) -> PyResult<PyObject> {
+fn sparse_to_scipy_csc(py: Python<'_>, mat: &sprs::CsMat<f64>) -> PyResult<Py<PyAny>> {
     let csc = if mat.is_csc() {
         mat.clone()
     } else {
@@ -52,7 +52,7 @@ fn sparse_to_scipy_csc(py: Python<'_>, mat: &sprs::CsMat<f64>) -> PyResult<PyObj
 }
 
 /// Parse a (data, indices, indptr, shape) tuple into a sparse CSC matrix.
-fn scipy_csc_to_sparse(py: Python<'_>, obj: &PyObject) -> PyResult<sprs::CsMat<f64>> {
+fn scipy_csc_to_sparse(py: Python<'_>, obj: &Py<PyAny>) -> PyResult<sprs::CsMat<f64>> {
     let (data_arr, indices_arr, indptr_arr, shape) = obj.extract::<(
         PyReadonlyArray1<f64>,
         PyReadonlyArray1<i64>,
@@ -104,7 +104,7 @@ fn scipy_csc_to_sparse(py: Python<'_>, obj: &PyObject) -> PyResult<sprs::CsMat<f
 ///
 /// Used for computing the additive relationship matrix inverse (A-inverse)
 /// needed for pedigree-based BLUP.
-#[pyclass(name = "Pedigree")]
+#[pyclass(name = "Pedigree", skip_from_py_object)]
 #[derive(Clone)]
 struct PyPedigree {
     inner: CorePedigree,
@@ -194,7 +194,7 @@ impl PyPedigree {
     /// -------
     /// tuple
     ///     (data, indices, indptr, shape) for constructing a scipy.sparse.csc_matrix.
-    fn compute_a_inverse(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn compute_a_inverse(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let ainv = core::genetics::compute_a_inverse(&self.inner).map_err(to_pyerr)?;
         sparse_to_scipy_csc(py, &ainv)
     }
@@ -207,7 +207,7 @@ impl PyPedigree {
     /// -------
     /// tuple
     ///     (data, indices, indptr, shape) for constructing a scipy.sparse.csc_matrix.
-    fn compute_a_inverse_with_inbreeding(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn compute_a_inverse_with_inbreeding(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let ainv =
             core::genetics::compute_a_inverse_with_inbreeding(&self.inner).map_err(to_pyerr)?;
         sparse_to_scipy_csc(py, &ainv)
@@ -316,7 +316,7 @@ impl PyMixedModel {
     /// ----------
     /// columns : dict
     ///     Mapping of column names to column data.
-    fn set_data(&mut self, py: Python<'_>, columns: HashMap<String, PyObject>) -> PyResult<()> {
+    fn set_data(&mut self, py: Python<'_>, columns: HashMap<String, Py<PyAny>>) -> PyResult<()> {
         let mut df = DataFrame::new();
 
         for (name, obj) in &columns {
@@ -463,7 +463,7 @@ impl PyMixedModel {
         &mut self,
         py: Python<'_>,
         column: &str,
-        ginverse: Option<PyObject>,
+        ginverse: Option<Py<PyAny>>,
         levels: Option<Vec<String>>,
         structure: Option<&str>,
     ) -> PyResult<()> {
@@ -1109,7 +1109,11 @@ impl PyFitResult {
 ///     (data, indices, indptr, shape) for scipy.sparse.csc_matrix.
 #[pyfunction]
 #[pyo3(signature = (ped, inbreeding=true))]
-fn compute_a_inverse(py: Python<'_>, ped: &mut PyPedigree, inbreeding: bool) -> PyResult<PyObject> {
+fn compute_a_inverse(
+    py: Python<'_>,
+    ped: &mut PyPedigree,
+    inbreeding: bool,
+) -> PyResult<Py<PyAny>> {
     if !ped.inner.is_sorted() {
         ped.inner.sort_pedigree().map_err(to_pyerr)?;
     }
