@@ -165,6 +165,7 @@ async function runFit() {
       model: structuredClone(state.model),
       options: { ...state.options },
       columns: columns(),
+      request,
     };
     const tab = state.pendingTab;
     state.pendingTab = null;

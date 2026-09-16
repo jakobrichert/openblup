@@ -25,6 +25,13 @@ Worker, so fits happen on the user's machine and no data is uploaded anywhere.
   field map of the spatial trend; genetic correlations, variances and FA
   loadings with genotype-by-environment reaction norms; the REML convergence
   path; cross-validation accuracy
+- **3D views** (Three.js, loaded on demand): the REML likelihood landscape
+  over any two variance parameters, evaluated by the engine, with the AI-REML
+  path and the 95 % joint confidence region; the spatial field trend as a
+  terrain under the plots, animated against the raw and trend-removed yields;
+  the pedigree in 3D coloured by breeding value, with lineage highlighting; and
+  G×E reaction norms. Every view exports a PNG or records a 1920 × 1080 clip of
+  one orbit (MP4 where the browser can encode it, otherwise WebM)
 - **Reproducible**: every model is shown as the equivalent `openblup fit`
   command and Python code; results export to JSON and BLUPs to CSV
 - Every chart has a table view, hover and keyboard tooltips, and light and dark
@@ -49,7 +56,7 @@ module worker to load. The `Studio` GitHub Actions workflow builds and tests
 the app on every pull request and publishes it to GitHub Pages from `main`.
 
 Deep links: `?example=spatial|met|animal|rcbd` loads and fits an example,
-`&tab=field|gxe|effects|diagnostics|convergence|cv|data` opens a result view,
+`&tab=3d|field|gxe|effects|diagnostics|convergence|cv|data` opens a result view,
 `&theme=light|dark` forces a theme.
 
 ## How it fits together
@@ -62,6 +69,7 @@ studio/
 │   ├── app.js          # state, data loading, the model-builder sidebar
 │   ├── results.js      # result tabs (overview, effects, residuals, field, G×E, ...)
 │   ├── charts.js       # SVG charts, tooltips, figure cards with table views
+│   ├── three/          # 3D views: stage (renderer, picking, recording) and one module per scene
 │   ├── examples.js     # example presets, request builder, CLI/Python code generation
 │   ├── engine.js       # promise API over the worker
 │   ├── worker.js       # loads pkg/openblup_studio.js and runs inspect/fit
@@ -70,8 +78,10 @@ studio/
 └── tests/smoke.mjs     # Node smoke test of the engine bindings
 ```
 
-The engine side is `crates/studio` (`openblup-studio`). It exposes two JSON
-functions, `inspect(csv)` and `fit(request)`; a request carries the CSV text,
+The engine side is `crates/studio` (`openblup-studio`). It exposes three JSON
+functions, `inspect(csv)`, `fit(request)` and `likelihood_surface(request,
+surface)` (the REML log-likelihood on a grid of two variance parameters, via
+`AiReml::log_likelihood_at`); a request carries the CSV text,
 an optional pedigree and a `FitSpec` in the CLI's term vocabulary
 (`plant_breeding_lmm_core::model::FitSpec`), so the Studio, the CLI and the
 engine share one model-specification parser. The response adds what the

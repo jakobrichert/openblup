@@ -678,11 +678,32 @@ function cvTab(fitState) {
       })));
 }
 
+// ------------------------------------------------------------ 3D
+
+// Disposers of live 3D stages (WebGL contexts), run before every re-render.
+let cleanups = [];
+
+function threeDTab(fitState, view) {
+  const root = h("div", { class: "stack" });
+  let dispose = null;
+  let cancelled = false;
+  cleanups.push(() => {
+    cancelled = true;
+    dispose?.();
+  });
+  import("./three/view3d.js")
+    .then(({ mount3D }) => {
+      if (!cancelled) dispose = mount3D(root, fitState, view);
+    })
+    .catch((err) => root.append(callout("error", [`The 3D view could not load: ${err.message}`])));
+  return root;
+}
+
 // ------------------------------------------------------------ main
 
 function tabsFor(fitState) {
   const r = fitState.result;
-  const tabs = [["overview", "Overview"]];
+  const tabs = [["overview", "Overview"], ["3d", "3D"]];
   if (r.fit.random_effects.length) tabs.push(["effects", r.pedigree ? "Breeding values" : "Random effects"]);
   tabs.push(["diagnostics", "Residuals"]);
   if (r.grid) tabs.push(["field", "Field map"]);
@@ -713,6 +734,8 @@ function exportResults(fitState) {
 }
 
 export function renderMain(root, state, actions) {
+  cleanups.forEach((fn) => fn());
+  cleanups = [];
   clear(root);
   root.classList.toggle("busy", state.busy);
   const fitState = state.fit;
@@ -766,6 +789,7 @@ export function renderMain(root, state, actions) {
     convergence: () => convergenceTab(fitState),
     cv: () => cvTab(fitState),
     data: () => dataView(state),
+    "3d": () => threeDTab(fitState, view),
   };
   panel.append(renderers[state.tab]());
   wrap.append(panel);

@@ -42,3 +42,4 @@ export function call(op, payload) {
 export const engineVersion = () => call("version").then((r) => r.result);
 export const inspectCsv = (csv) => call("inspect", csv).then((r) => r.result);
 export const fitModel = (request) => call("fit", request);
+export const likelihoodSurface = (request, surface) => call("surface", { request, surface }).then((r) => r.result);

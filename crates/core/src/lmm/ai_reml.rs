@@ -46,6 +46,44 @@ impl AiReml {
         self
     }
 
+    /// The REML log-likelihood at `theta` without fitting.
+    ///
+    /// `theta` is the flat parameter vector in the order of
+    /// [`FitResult::variance_components`] (one variance per random term and
+    /// the residual variance for scaled-identity models; the structures'
+    /// native parameters otherwise), i.e. the order of
+    /// [`RemlIteration::variance_params`](super::RemlIteration). Models that
+    /// need the general engine are evaluated there. The model's parameters
+    /// are left unchanged.
+    pub fn log_likelihood_at(&self, model: &mut MixedModel, theta: &[f64]) -> Result<f64> {
+        if model.needs_general_engine() {
+            return super::GeneralReml::new(self.max_iter, self.tol)
+                .log_likelihood_at(model, theta);
+        }
+        let k = model.random_var_structs.len();
+        let bounds: Vec<(f64, f64)> = model
+            .random_var_structs
+            .iter()
+            .flat_map(|vs| vs.bounds())
+            .chain(model.residual_var_struct.bounds())
+            .collect();
+        super::general_reml::check_theta(theta, &bounds)?;
+        let saved: Vec<f64> = model
+            .random_var_structs
+            .iter()
+            .map(|vs| vs.params()[0])
+            .chain([model.residual_var_struct.params()[0]])
+            .collect();
+        let logl = self
+            .solve_at(model, &theta[..k], theta[k])
+            .map(|(mme, sol)| self.log_likelihood(model, &mme, &sol, &theta[..k], theta[k]));
+        for (vs, s) in model.random_var_structs.iter_mut().zip(&saved) {
+            vs.set_params(&[*s])?;
+        }
+        model.residual_var_struct.set_params(&[saved[k]])?;
+        logl
+    }
+
     /// Fit the model using AI-REML with EM burn-in.
     ///
     /// Models with multi-parameter variance structures (AR1, Diagonal,

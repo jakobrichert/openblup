@@ -549,3 +549,50 @@ table.data .muted { color: var(--ink-3); }
 .main.busy .results { opacity: 0.55; transition: opacity 0.15s; }
 
 .foot { color: var(--ink-3); font-size: 12px; text-align: center; padding: 8px 0 24px; }
+
+/* 3D stage */
+.stage {
+  position: relative; overflow: hidden;
+  border-radius: 10px; border: 1px solid var(--border);
+  background: var(--surface-2);
+  min-height: 320px;
+}
+.stage canvas { display: block; width: 100%; outline: none; touch-action: none; }
+.stage canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.stage-overlay {
+  position: absolute; left: 14px; top: 12px; right: 14px;
+  display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;
+  pointer-events: none;
+}
+.stage-caption {
+  max-width: 460px; padding: 8px 12px; border-radius: 10px;
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border);
+  font-size: 12.5px; color: var(--ink-2);
+}
+.stage-caption strong { display: block; color: var(--ink); font-size: 13.5px; margin-bottom: 2px; }
+.stage-legend {
+  padding: 8px 12px; border-radius: 10px; font-size: 11.5px; color: var(--ink-2);
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 6px; min-width: 170px;
+}
+.stage-legend .ramp { width: 150px; height: 8px; border-radius: 3px; }
+.stage-legend .ends { display: flex; justify-content: space-between; font-variant-numeric: tabular-nums; }
+.stage-legend .key { display: flex; align-items: center; gap: 8px; }
+.stage-legend .key i { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+.stage-legend .key i.dot { width: 9px; height: 9px; border-radius: 50%; }
+.stage-status {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  color: var(--ink-2); font-size: 13px; pointer-events: none;
+}
+.stage-hint { position: absolute; right: 12px; bottom: 10px; font-size: 11.5px; color: var(--ink-3); pointer-events: none; }
+.btn.recording { border-color: var(--critical); color: var(--critical); }
+.btn .rec-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--critical); display: inline-block; }
+@media (max-width: 700px) {
+  .stage-overlay { flex-direction: column; }
+  .stage-legend { display: none; }
+}
+.stage-status[hidden] { display: none; }
