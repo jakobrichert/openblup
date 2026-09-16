@@ -213,6 +213,7 @@ export async function createStage(host, { height = 560, cameraPosition = [7, 5.5
     s.userData.pixelSize = [w / scale, h / scale];
     s.center.set(align === "left" ? 0 : align === "right" ? 1 : 0.5, 0.5);
     tickers.add(() => {
+      if (s.userData.hud) return;
       // constant on-screen size
       const k = (2 * Math.tan((camera.fov * Math.PI) / 360)) / cssHeight;
       s.scale.set((w / scale) * k, (h / scale) * k, 1);
@@ -220,16 +221,41 @@ export async function createStage(host, { height = 560, cameraPosition = [7, 5.5
     return s;
   };
 
+  const hudText = (text, { x, y, size = 28, weight = 600, color = ink, align = "left", bg = null }) => {
+    const sp = sprite(text, { color, size, weight, bg, align, onTop: true });
+    const [w, h] = sp.userData.pixelSize;
+    sp.material.sizeAttenuation = true;
+    sp.material.depthTest = false;
+    sp.userData.hud = true;
+    sp.scale.set(w, h, 1);
+    sp.position.set(x, y, 0);
+    hud.add(sp);
+    return sp;
+  };
+
   const fatMaterial = (opts) => new T.LineMaterial({ worldUnits: false, linewidth: 2, transparent: true, ...opts });
 
   // ---- loop ----
   let fixedDelta = null;
+  // Heads-up display (title card) drawn over the scene while recording.
+  const hud = new THREE.Scene();
+  const hudCamera = new THREE.OrthographicCamera(0, 1920, 1080, 0, -10, 10);
+  renderer.autoClear = false;
+  const renderFrame = () => {
+    renderer.clear();
+    renderer.render(scene, camera);
+    if (hud.children.length) {
+      renderer.clearDepth();
+      renderer.render(hud, hudCamera);
+    }
+  };
+
   renderer.setAnimationLoop((time) => {
     timer.update(time);
     const dt = fixedDelta ?? Math.min(0.05, timer.getDelta());
     for (const fn of [...tickers]) fn(dt);
     controls.update(dt);
-    renderer.render(scene, camera);
+    renderFrame();
   });
 
   /** Frame a bounding sphere from the current viewing direction. */
@@ -267,7 +293,7 @@ export async function createStage(host, { height = 560, cameraPosition = [7, 5.5
   };
 
   const snapshot = (filename) => {
-    renderer.render(scene, camera);
+    renderFrame();
     canvas.toBlob((blob) => {
       if (!blob) return;
       const a = document.createElement("a");
@@ -279,7 +305,7 @@ export async function createStage(host, { height = 560, cameraPosition = [7, 5.5
   };
 
   /** Record one full orbit at 1920x1080. Resolves with {blob, extension}. */
-  const record = async ({ seconds = 12, width = 1920, heightPx = 1080, onFrame } = {}) => {
+  const record = async ({ seconds = 12, width = 1920, heightPx = 1080, onFrame, title, subtitle } = {}) => {
     const types = ["video/mp4;codecs=avc1.640028", "video/mp4;codecs=avc1", "video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
     const mimeType = types.find((t) => window.MediaRecorder && MediaRecorder.isTypeSupported(t));
     if (!mimeType) throw new Error("This browser cannot record video from a canvas.");
@@ -291,12 +317,22 @@ export async function createStage(host, { height = 560, cameraPosition = [7, 5.5
     camera.updateProjectionMatrix();
     const k = (2 * Math.tan((camera.fov * Math.PI) / 360)) / heightPx;
     const spriteScale = () => scene.traverse((o) => {
-      if (o.isSprite && o.userData.pixelSize) {
+      if (o.isSprite && o.userData.pixelSize && !o.userData.hud) {
         const [w, h] = o.userData.pixelSize;
         o.scale.set(w * 1.6 * k, h * 1.6 * k, 1);
       }
     });
     tickers.add(spriteScale);
+    hudCamera.right = width;
+    hudCamera.top = heightPx;
+    hudCamera.updateProjectionMatrix();
+    const card = [];
+    if (title) {
+      card.push(hudText(title, { x: 64, y: heightPx - 72, size: 44, weight: 700 }));
+      if (subtitle) card.push(hudText(subtitle, { x: 64, y: heightPx - 128, size: 26, weight: 500, color: ink2 }));
+      card.push(hudText("OpenBLUP Studio · open-source REML / BLUP · Rust → WebAssembly", { x: 64, y: 56, size: 22, weight: 500, color: ink3 }));
+      card.push(hudText("jakobrichert.github.io/openblup", { x: width - 64, y: 56, size: 22, weight: 600, color: ink2, align: "right" }));
+    }
     controls.autoRotate = true;
     controls.autoRotateSpeed = 60 / seconds;
     fixedDelta = 1 / 60;
@@ -325,6 +361,11 @@ export async function createStage(host, { height = 560, cameraPosition = [7, 5.5
     await done;
     stream.getTracks().forEach((t) => t.stop());
     tickers.delete(spriteScale);
+    for (const sp of card) {
+      hud.remove(sp);
+      sp.material.map.dispose();
+      sp.material.dispose();
+    }
     fixedDelta = null;
     renderer.setPixelRatio(saved.pr);
     controls.autoRotate = saved.auto;

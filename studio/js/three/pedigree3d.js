@@ -85,6 +85,7 @@ export function buildPedigree(stage, fitState, pedTerm) {
   group.add(floor);
 
   // ---- generation rings and labels ----
+  const ringLabels = [];
   layers.forEach((layer, g) => {
     const ring = new THREE.Mesh(
       new THREE.TorusGeometry(radius[g], 0.008, 6, 128),
@@ -93,9 +94,19 @@ export function buildPedigree(stage, fitState, pedTerm) {
     ring.rotation.x = Math.PI / 2;
     ring.position.y = height - g * GAP + 0.6;
     group.add(ring);
-    const label = sprite(g === 0 ? `Founders · ${layer.length}` : `Generation ${g} · ${layer.length}`, { color: colors.ink2, size: 12, weight: 600, align: "left" });
+    const label = sprite(g === 0 ? `Founders · ${layer.length}` : `Generation ${g} · ${layer.length}`, { color: colors.ink2, size: 12, weight: 600, align: "left", onTop: true });
     label.position.set(radius[g] + 0.5, height - g * GAP + 0.6, 0);
     group.add(label);
+    ringLabels.push({ label, r: radius[g] + 0.5, y: height - g * GAP + 0.6 });
+  });
+  // Keep each label beside its ring on the right of the screen as the camera orbits.
+  const right = new THREE.Vector3();
+  stage.onTick(() => {
+    right.setFromMatrixColumn(stage.camera.matrixWorld, 0);
+    right.y = 0;
+    if (right.lengthSq() < 1e-9) return;
+    right.normalize();
+    for (const { label, r, y } of ringLabels) label.position.set(right.x * r, y, right.z * r);
   });
 
   // ---- links ----
@@ -208,7 +219,7 @@ export function buildPedigree(stage, fitState, pedTerm) {
   });
 
   return {
-    radius: Math.hypot(floorR, height / 2 + 0.8),
+    radius: Math.hypot(floorR, height / 2 + 0.8) * 0.85,
     center: [0, height / 2 + 0.2, 0],
     legend: {
       ramp: div.css,

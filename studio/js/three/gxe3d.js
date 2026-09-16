@@ -161,8 +161,8 @@ export function buildGxe(stage, fitState, cov) {
     s.position.set(xOf(e), BASE, D / 2 + 0.75);
     group.add(s);
   });
-  const envTitle = sprite(byLoading ? `${envCol}, ordered by FA loading` : envCol, { color: colors.ink3, size: 12 });
-  envTitle.position.set(0, BASE, D / 2 + 1.35);
+  const envTitle = sprite(byLoading ? `${envCol}, ordered by FA loading` : envCol, { color: colors.ink3, size: 11 });
+  envTitle.position.set(0, BASE, D / 2 + 1.9);
   group.add(envTitle);
   const zero = sprite("0", { color: colors.ink3, size: 11, align: "right" });
   zero.position.set(-W / 2 - 0.5, BASE, D / 2 + 0.4);

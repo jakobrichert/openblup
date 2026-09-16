@@ -181,7 +181,18 @@ export function mount3D(root, fitState, view) {
         applyFieldMode();
         playStory(4000);
       }
+      const titles = {
+        likelihood: ["The REML likelihood landscape", "AI-REML climbing to the maximum, with the 95% joint confidence region"],
+        field: ["Separating field trend from genetics", fitState.result.grid
+          ? `An AR1 × AR1 spatial model on a ${fitState.result.grid.row_levels.length} × ${fitState.result.grid.col_levels.length} field trial`
+          : "An AR1 × AR1 spatial model"],
+        pedigree: ["Breeding values through a pedigree", "Information flows along parent–offspring links"],
+        gxe: ["Genotype-by-environment reaction norms", "Factor-analytic model across environments"],
+      };
+      const [title, subtitle] = titles[view.scene];
       const { blob, extension } = await stage.record({
+        title,
+        subtitle,
         seconds: isField ? 16 : 12,
         onFrame: (p) => { if (button) button.lastChild.textContent = `Recording… ${Math.round(p * 100)}%`; },
       });
