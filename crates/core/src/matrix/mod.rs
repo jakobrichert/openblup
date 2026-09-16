@@ -6,5 +6,5 @@ pub mod sparse_inverse;
 pub use sparse::TripletBuilder;
 pub use sparse_cholesky::SparseCholeskySolver;
 pub use sparse_inverse::{
-    sparse_cholesky_factor, sparse_inverse_diagonal, sparse_inverse_subset, trace_ainv_b,
+    sparse_inverse_diagonal, sparse_inverse_subset, trace_ainv_b, trace_subset_b,
 };

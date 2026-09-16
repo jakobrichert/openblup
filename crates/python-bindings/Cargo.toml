@@ -6,7 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [lib]
-name = "openblup"
+name = "_internal"
 crate-type = ["cdylib"]
 
 [dependencies]
@@ -15,3 +15,6 @@ numpy = { workspace = true }
 plant-breeding-lmm-core = { path = "../core" }
 nalgebra = { workspace = true }
 sprs = { workspace = true }
+
+[build-dependencies]
+pyo3-build-config = "0.23"

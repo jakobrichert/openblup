@@ -179,14 +179,15 @@ impl RrBlup {
             // EM update for σ²_e
             let xb = &self.x_matrix * nalgebra::DVector::from_column_slice(&b_hat);
             let mu = &self.marker_matrix * nalgebra::DVector::from_column_slice(&u_hat);
-            let resid: f64 = (0..n)
-                .map(|i| (self.y[i] - xb[i] - mu[i]).powi(2))
-                .sum();
+            let resid: f64 = (0..n).map(|i| (self.y[i] - xb[i] - mu[i]).powi(2)).sum();
             sigma2_e = (resid / (n - p) as f64).max(1e-10);
 
             // Convergence check
-            let change = ((sigma2_u - old_sigma2_u).powi(2) + (sigma2_e - old_sigma2_e).powi(2)).sqrt()
-                / (old_sigma2_u.powi(2) + old_sigma2_e.powi(2)).sqrt().max(1e-10);
+            let change = ((sigma2_u - old_sigma2_u).powi(2) + (sigma2_e - old_sigma2_e).powi(2))
+                .sqrt()
+                / (old_sigma2_u.powi(2) + old_sigma2_e.powi(2))
+                    .sqrt()
+                    .max(1e-10);
 
             n_iter = iter + 1;
             if iter > 0 && change < tol {
@@ -200,11 +201,29 @@ impl RrBlup {
         let dim = p + m;
         let mut c = DMatrix::zeros(dim, dim);
         let mut rhs = nalgebra::DVector::zeros(dim);
-        for i in 0..p { for j in 0..p { c[(i, j)] = xtx[(i, j)]; } }
-        for i in 0..p { for j in 0..m { c[(i, p+j)] = xtm[(i, j)]; c[(p+j, i)] = xtm[(i, j)]; } }
-        for i in 0..m { for j in 0..m { c[(p+i, p+j)] = mtm[(i, j)]; } c[(p+i, p+i)] += lambda; }
-        for i in 0..p { rhs[i] = xty[i]; }
-        for i in 0..m { rhs[p+i] = mty[i]; }
+        for i in 0..p {
+            for j in 0..p {
+                c[(i, j)] = xtx[(i, j)];
+            }
+        }
+        for i in 0..p {
+            for j in 0..m {
+                c[(i, p + j)] = xtm[(i, j)];
+                c[(p + j, i)] = xtm[(i, j)];
+            }
+        }
+        for i in 0..m {
+            for j in 0..m {
+                c[(p + i, p + j)] = mtm[(i, j)];
+            }
+            c[(p + i, p + i)] += lambda;
+        }
+        for i in 0..p {
+            rhs[i] = xty[i];
+        }
+        for i in 0..m {
+            rhs[p + i] = mty[i];
+        }
 
         let chol = c.clone().cholesky().ok_or(LmmError::NotPositiveDefinite)?;
         let sol = chol.solve(&rhs);
@@ -220,18 +239,27 @@ impl RrBlup {
         let n_eff = (n - p) as f64;
         let l_diag = chol.l();
         let log_det_c = 2.0 * (0..dim).map(|i| l_diag[(i, i)].ln()).sum::<f64>();
-        let ypy: f64 = (0..n).map(|i| {
-            let fitted = {
-                let mut f = 0.0;
-                for j in 0..p { f += self.x_matrix[(i, j)] * fixed_effects[j]; }
-                for j in 0..m { f += self.marker_matrix[(i, j)] * marker_effects[j]; }
-                f
-            };
-            (self.y[i] - fitted).powi(2)
-        }).sum();
-        let log_l = -0.5 * (n_eff * (2.0 * std::f64::consts::PI).ln()
-            + n_eff * sigma2_e.ln() + m as f64 * sigma2_u.ln()
-            + log_det_c + ypy / sigma2_e);
+        let ypy: f64 = (0..n)
+            .map(|i| {
+                let fitted = {
+                    let mut f = 0.0;
+                    for j in 0..p {
+                        f += self.x_matrix[(i, j)] * fixed_effects[j];
+                    }
+                    for j in 0..m {
+                        f += self.marker_matrix[(i, j)] * marker_effects[j];
+                    }
+                    f
+                };
+                (self.y[i] - fitted).powi(2)
+            })
+            .sum();
+        let log_l = -0.5
+            * (n_eff * (2.0 * std::f64::consts::PI).ln()
+                + n_eff * sigma2_e.ln()
+                + m as f64 * sigma2_u.ln()
+                + log_det_c
+                + ypy / sigma2_e);
 
         let heritability = (sigma2_u * m as f64) / (sigma2_u * m as f64 + sigma2_e);
 
@@ -270,11 +298,29 @@ impl RrBlup {
         let xty = &xt * &y_vec;
         let mty = &mt * &y_vec;
 
-        for i in 0..p { for j in 0..p { c[(i, j)] = xtx[(i, j)]; } }
-        for i in 0..p { for j in 0..m { c[(i, p+j)] = xtm[(i, j)]; c[(p+j, i)] = xtm[(i, j)]; } }
-        for i in 0..m { for j in 0..m { c[(p+i, p+j)] = mtm[(i, j)]; } c[(p+i, p+i)] += lambda; }
-        for i in 0..p { rhs[i] = xty[i]; }
-        for i in 0..m { rhs[p+i] = mty[i]; }
+        for i in 0..p {
+            for j in 0..p {
+                c[(i, j)] = xtx[(i, j)];
+            }
+        }
+        for i in 0..p {
+            for j in 0..m {
+                c[(i, p + j)] = xtm[(i, j)];
+                c[(p + j, i)] = xtm[(i, j)];
+            }
+        }
+        for i in 0..m {
+            for j in 0..m {
+                c[(p + i, p + j)] = mtm[(i, j)];
+            }
+            c[(p + i, p + i)] += lambda;
+        }
+        for i in 0..p {
+            rhs[i] = xty[i];
+        }
+        for i in 0..m {
+            rhs[p + i] = mty[i];
+        }
 
         let chol = c.cholesky().ok_or(LmmError::NotPositiveDefinite)?;
         let sol = chol.solve(&rhs);
@@ -285,22 +331,33 @@ impl RrBlup {
         let gebv = &self.marker_matrix * &u_vec;
         let breeding_values: Vec<f64> = gebv.as_slice().to_vec();
 
-        let resid: f64 = (0..n).map(|i| {
-            let mut f = 0.0;
-            for j in 0..p { f += self.x_matrix[(i, j)] * fixed_effects[j]; }
-            for j in 0..m { f += self.marker_matrix[(i, j)] * marker_effects[j]; }
-            (self.y[i] - f).powi(2)
-        }).sum();
+        let resid: f64 = (0..n)
+            .map(|i| {
+                let mut f = 0.0;
+                for j in 0..p {
+                    f += self.x_matrix[(i, j)] * fixed_effects[j];
+                }
+                for j in 0..m {
+                    f += self.marker_matrix[(i, j)] * marker_effects[j];
+                }
+                (self.y[i] - f).powi(2)
+            })
+            .sum();
         let sigma2_e = resid / (n - p) as f64;
         let sigma2_u = sigma2_e / lambda;
         let heritability = (sigma2_u * m as f64) / (sigma2_u * m as f64 + sigma2_e);
 
         let result = RrBlupResult {
-            fixed_effects, marker_effects, breeding_values,
-            sigma2_u, sigma2_e, lambda,
+            fixed_effects,
+            marker_effects,
+            breeding_values,
+            sigma2_u,
+            sigma2_e,
+            lambda,
             log_likelihood: 0.0,
             heritability,
-            n_iterations: 1, converged: true,
+            n_iterations: 1,
+            converged: true,
         };
         self.result = Some(result.clone());
         Ok(result)
@@ -308,7 +365,10 @@ impl RrBlup {
 
     /// Predict breeding values for new individuals.
     pub fn predict(&self, new_genotypes: &DMatrix<f64>) -> Result<Vec<f64>> {
-        let result = self.result.as_ref().ok_or_else(|| LmmError::ModelSpec("Model not fitted".into()))?;
+        let result = self
+            .result
+            .as_ref()
+            .ok_or_else(|| LmmError::ModelSpec("Model not fitted".into()))?;
         let m = self.marker_matrix.ncols();
         assert_eq!(new_genotypes.ncols(), m, "marker count mismatch");
 
@@ -339,13 +399,16 @@ mod tests {
 
     fn simple_data() -> (DMatrix<f64>, DMatrix<f64>, Vec<f64>) {
         // 5 individuals, 10 markers
-        let geno = DMatrix::from_row_slice(5, 10, &[
-            0.0, 1.0, 2.0, 1.0, 0.0, 2.0, 1.0, 0.0, 1.0, 2.0,
-            2.0, 1.0, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 1.0, 0.0,
-            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-            0.0, 2.0, 1.0, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 0.0,
-            2.0, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0,
-        ]);
+        let geno = DMatrix::from_row_slice(
+            5,
+            10,
+            &[
+                0.0, 1.0, 2.0, 1.0, 0.0, 2.0, 1.0, 0.0, 1.0, 2.0, 2.0, 1.0, 0.0, 1.0, 2.0, 0.0,
+                1.0, 2.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 2.0,
+                1.0, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 0.0, 2.0, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 0.0,
+                1.0, 2.0,
+            ],
+        );
         // Intercept-only X
         let x = DMatrix::from_element(5, 1, 1.0);
         let y = vec![105.0, 98.0, 101.0, 96.0, 110.0];
@@ -405,12 +468,13 @@ mod tests {
     #[test]
     fn test_rrblup_known_effects() {
         // Create data where true effects are known
-        let m = DMatrix::from_row_slice(4, 3, &[
-            -1.0, 0.0, 1.0,
-             1.0, -1.0, 0.0,
-             0.0, 1.0, -1.0,
-            -1.0, 1.0, 0.0,
-        ]);
+        let m = DMatrix::from_row_slice(
+            4,
+            3,
+            &[
+                -1.0, 0.0, 1.0, 1.0, -1.0, 0.0, 0.0, 1.0, -1.0, -1.0, 1.0, 0.0,
+            ],
+        );
         let x = DMatrix::from_element(4, 1, 1.0);
         // True: b=100, u=[2, -1, 1], y = Xb + Mu
         let true_u = nalgebra::DVector::from_column_slice(&[2.0, -1.0, 1.0]);

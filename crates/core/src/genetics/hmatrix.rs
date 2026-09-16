@@ -151,10 +151,7 @@ pub fn compute_h_inverse(
         .iter()
         .map(|id| {
             ped.animal_index(id).ok_or_else(|| {
-                LmmError::Pedigree(format!(
-                    "Genotyped animal '{}' not found in pedigree",
-                    id
-                ))
+                LmmError::Pedigree(format!("Genotyped animal '{}' not found in pedigree", id))
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -386,12 +383,7 @@ mod tests {
         // Should be identical to A.
         for i in 0..3 {
             for j in 0..3 {
-                assert_approx(
-                    a22[(i, j)],
-                    a[(i, j)],
-                    1e-14,
-                    &format!("A22[{},{}]", i, j),
-                );
+                assert_approx(a22[(i, j)], a[(i, j)], 1e-14, &format!("A22[{},{}]", i, j));
             }
         }
     }

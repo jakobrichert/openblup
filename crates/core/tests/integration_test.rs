@@ -5,20 +5,23 @@
 //! Data: A balanced trial with 3 genotypes x 2 reps = 6 observations.
 //! This is deliberately simple so we can verify the results by hand.
 
+#![allow(clippy::needless_range_loop)]
+
 use approx::assert_relative_eq;
 use plant_breeding_lmm_core::data::DataFrame;
 use plant_breeding_lmm_core::model::MixedModelBuilder;
 use plant_breeding_lmm_core::variance::Identity;
 
 fn create_test_data() -> DataFrame {
-    // Simple balanced trial:
-    // Genotype G1: rep1=10, rep2=12  (mean=11)
-    // Genotype G2: rep1=8, rep2=10   (mean=9)
-    // Genotype G3: rep1=6, rep2=8    (mean=7)
-    // Rep effect: rep2 = rep1 + 2
-    // Overall mean = 9
+    // Simple balanced trial (genotype + rep effects plus a little noise so
+    // that the residual variance is strictly positive):
+    // Genotype G1: rep1=10.3, rep2=11.8  (mean=11.05)
+    // Genotype G2: rep1=7.8,  rep2=10.1  (mean=8.95)
+    // Genotype G3: rep1=6.2,  rep2=7.9   (mean=7.05)
+    // Rep effect: rep2 ~ rep1 + 2
+    // Overall mean ~ 9
     let mut df = DataFrame::new();
-    df.add_float_column("yield", vec![10.0, 8.0, 6.0, 12.0, 10.0, 8.0])
+    df.add_float_column("yield", vec![10.3, 7.8, 6.2, 11.8, 10.1, 7.9])
         .unwrap();
     df.add_factor_column("genotype", &["G1", "G2", "G3", "G1", "G2", "G3"])
         .unwrap();
@@ -34,7 +37,7 @@ fn test_fit_simple_mixed_model() {
     let mut model = MixedModelBuilder::new()
         .data(&df)
         .response("yield")
-        .fixed("rep")  // factor levels (R1, R2) absorb the mean — full rank
+        .fixed("rep") // factor levels (R1, R2) absorb the mean — full rank
         .random("genotype", Identity::new(1.0), None)
         .max_iterations(50)
         .convergence(1e-8)
@@ -53,7 +56,11 @@ fn test_fit_simple_mixed_model() {
     // Variance components should be positive
     for vc in &result.variance_components {
         for (_, val) in &vc.parameters {
-            assert!(*val > 0.0, "Variance component should be positive: {}", vc.name);
+            assert!(
+                *val > 0.0,
+                "Variance component should be positive: {}",
+                vc.name
+            );
         }
     }
 
@@ -87,12 +94,13 @@ fn test_fit_simple_mixed_model() {
     assert_relative_eq!(blup_sum, 0.0, epsilon = 0.1);
 
     // BLUPs should be shrunk toward zero compared to raw genotype means
-    // Raw deviation of G1 from overall mean: 11 - 9 = 2
+    // Raw deviation of G1 from overall mean: 11.05 - 9.017 = 2.03
     assert!(
-        g1_blup.abs() < 2.0,
-        "BLUP should be shrunk: {} should be < 2.0",
+        g1_blup.abs() < 2.03,
+        "BLUP should be shrunk: {} should be < 2.03",
         g1_blup.abs()
     );
+    assert_eq!(result.at_boundary, vec![false, false]);
 
     // Residuals should sum to approximately zero
     let resid_sum: f64 = result.residuals.iter().sum();
@@ -137,8 +145,8 @@ fn test_fit_intercept_only() {
 #[test]
 fn test_fit_larger_dataset() {
     // Simulate a larger dataset with 5 genotypes x 3 reps = 15 observations
-    let genotypes = vec!["G1", "G2", "G3", "G4", "G5"];
-    let reps = vec!["R1", "R2", "R3"];
+    let genotypes = ["G1", "G2", "G3", "G4", "G5"];
+    let reps = ["R1", "R2", "R3"];
 
     let mut yields = Vec::new();
     let mut geno_col = Vec::new();
@@ -150,7 +158,9 @@ fn test_fit_larger_dataset() {
     let rep_effects = [-1.0, 0.0, 1.0];
     let mu = 10.0;
     // Small residuals for testing
-    let residuals = [0.1, -0.2, 0.15, -0.1, 0.05, 0.2, -0.15, 0.1, -0.05, 0.12, -0.08, 0.03, 0.07, -0.11, 0.06];
+    let residuals = [
+        0.1, -0.2, 0.15, -0.1, 0.05, 0.2, -0.15, 0.1, -0.05, 0.12, -0.08, 0.03, 0.07, -0.11, 0.06,
+    ];
 
     let mut idx = 0;
     for (r, rep) in reps.iter().enumerate() {
@@ -185,7 +195,12 @@ fn test_fit_larger_dataset() {
     let blups = &result.random_effects[0].effects;
     let g1 = blups.iter().find(|e| e.level == "G1").unwrap().estimate;
     let g5 = blups.iter().find(|e| e.level == "G5").unwrap().estimate;
-    assert!(g1 > g5, "G1 ({}) should have higher BLUP than G5 ({})", g1, g5);
+    assert!(
+        g1 > g5,
+        "G1 ({}) should have higher BLUP than G5 ({})",
+        g1,
+        g5
+    );
 
     println!("{}", result.summary());
 }

@@ -20,7 +20,7 @@
 //! ```
 
 use crate::error::{LmmError, Result};
-use crate::lmm::MixedModelEquations;
+use crate::lmm::SparseMixedModelEquations;
 use crate::matrix::sparse::{sparse_diagonal, spmv};
 
 use rand::seq::SliceRandom;
@@ -33,7 +33,7 @@ pub struct CrossValidator {
     /// Random seed for reproducibility.
     seed: u64,
     /// Whether to stratify by a factor (strata indices).
-    stratify_by: Option<String>,
+    stratify_by: Option<Vec<usize>>,
     /// Maximum REML iterations per fold.
     max_iter: usize,
     /// REML convergence tolerance.
@@ -95,9 +95,14 @@ impl CrossValidator {
         self
     }
 
-    /// Set the stratification column name (for stratified k-fold CV).
-    pub fn stratify(mut self, column: &str) -> Self {
-        self.stratify_by = Some(column.to_string());
+    /// Enable stratified k-fold CV.
+    ///
+    /// `strata[i]` is the stratum (e.g. environment or genotype group, coded
+    /// as 0-based integers) of observation `i`. Observations are shuffled
+    /// within each stratum and dealt round-robin to the folds, so every fold
+    /// gets a similar share of each stratum.
+    pub fn stratify_by(mut self, strata: Vec<usize>) -> Self {
+        self.stratify_by = Some(strata);
         self
     }
 
@@ -128,9 +133,9 @@ impl CrossValidator {
     /// * `y` - Full response vector (length n)
     /// * `x` - Fixed effects design matrix (n x p, sparse CSC)
     /// * `z` - Random effects design matrix (n x q, sparse CSC). For multiple
-    ///         random terms, pass a single concatenated Z = [Z1 | Z2 | ...].
+    ///   random terms, pass a single concatenated Z = [Z1 | Z2 | ...].
     /// * `ginv` - Optional relationship matrix inverse (q x q). Pass `None`
-    ///           to use an identity matrix (IID random effects).
+    ///   to use an identity matrix (IID random effects).
     ///
     /// # Returns
     ///
@@ -164,12 +169,23 @@ impl CrossValidator {
             });
         }
 
-        let folds = create_folds(n, self.n_folds, self.seed);
+        let folds = match &self.stratify_by {
+            Some(strata) => {
+                if strata.len() != n {
+                    return Err(LmmError::DimensionMismatch {
+                        expected: n,
+                        got: strata.len(),
+                        context: "strata vector must have one entry per observation".into(),
+                    });
+                }
+                create_stratified_folds(strata, self.n_folds, self.seed)
+            }
+            None => create_folds(n, self.n_folds, self.seed),
+        };
         let mut fold_results = Vec::with_capacity(self.n_folds);
 
         for (fold_idx, val_indices) in folds.iter().enumerate() {
-            let fold_result =
-                self.run_fold(fold_idx, val_indices, y, x, z, ginv)?;
+            let fold_result = self.run_fold(fold_idx, val_indices, y, x, z, ginv)?;
             fold_results.push(fold_result);
         }
 
@@ -225,10 +241,7 @@ impl CrossValidator {
 
         // Initialize variance parameters from data
         let y_mean: f64 = y_train.iter().sum::<f64>() / n_train as f64;
-        let y_var: f64 = y_train
-            .iter()
-            .map(|&yi| (yi - y_mean).powi(2))
-            .sum::<f64>()
+        let y_var: f64 = y_train.iter().map(|&yi| (yi - y_mean).powi(2)).sum::<f64>()
             / (n_train - 1).max(1) as f64;
         let init_var = (y_var / 2.0).max(0.01);
 
@@ -247,18 +260,16 @@ impl CrossValidator {
             let r_inv_scale = 1.0 / sigma2_e;
 
             // Assemble and solve MME
-            let mme = MixedModelEquations::assemble(
+            let mme = SparseMixedModelEquations::assemble(
                 &x_train,
-                &[z_train.clone()],
+                std::slice::from_ref(&z_train),
                 &y_train,
                 r_inv_scale,
                 &[g_inv_block],
             );
             let sol = mme.solve()?;
 
-            let c_inv = sol.c_inv.as_ref().ok_or(LmmError::CholeskyFailed(
-                "C^{-1} not available".into(),
-            ))?;
+            let c_inv = sol.inverse()?;
 
             let n_fixed = mme.n_fixed;
             let n_eff = (n_train - n_fixed) as f64;
@@ -286,30 +297,18 @@ impl CrossValidator {
 
             let n_fixed_cols = mme.n_fixed;
             let trace_term = if let Some(ginv_mat) = ginv {
-                let mut tr = 0.0;
-                for i in 0..q {
-                    for j in 0..q {
-                        let kinv_ij = ginv_mat.get(i, j).copied().unwrap_or(0.0);
-                        let cinv_ji = c_inv[(n_fixed_cols + j, n_fixed_cols + i)];
-                        tr += kinv_ij * cinv_ji;
-                    }
-                }
-                tr
+                c_inv.trace_block(ginv_mat, n_fixed_cols)
             } else {
-                let mut tr = 0.0;
-                for i in 0..q {
-                    tr += c_inv[(n_fixed_cols + i, n_fixed_cols + i)];
-                }
-                tr
+                sol.c_inv_diag[n_fixed_cols..n_fixed_cols + q]
+                    .iter()
+                    .sum::<f64>()
             };
 
-            let new_sigma2_g =
-                ((u_quadratic + trace_term) / q as f64).max(1e-10);
+            let new_sigma2_g = ((u_quadratic + trace_term) / q as f64).max(1e-10);
 
             // Check convergence
-            let change = ((new_sigma2_e - sigma2_e).powi(2)
-                + (new_sigma2_g - sigma2_g).powi(2))
-            .sqrt()
+            let change = ((new_sigma2_e - sigma2_e).powi(2) + (new_sigma2_g - sigma2_g).powi(2))
+                .sqrt()
                 / (sigma2_e.powi(2) + sigma2_g.powi(2)).sqrt().max(1e-10);
 
             sigma2_e = new_sigma2_e;
@@ -328,9 +327,9 @@ impl CrossValidator {
         };
 
         let r_inv_scale = 1.0 / sigma2_e;
-        let mme = MixedModelEquations::assemble(
+        let mme = SparseMixedModelEquations::assemble(
             &x_train,
-            &[z_train.clone()],
+            std::slice::from_ref(&z_train),
             &y_train,
             r_inv_scale,
             &[g_inv_block],
@@ -388,8 +387,7 @@ impl CrossValResult {
         s.push_str("=== Cross-Validation Results ===\n\n");
         s.push_str(&format!("Number of folds: {}\n", self.folds.len()));
 
-        let total_obs: usize =
-            self.folds.iter().map(|f| f.validation_indices.len()).sum();
+        let total_obs: usize = self.folds.iter().map(|f| f.validation_indices.len()).sum();
         s.push_str(&format!("Total observations: {}\n\n", total_obs));
 
         s.push_str("--- Per-fold Results ---\n");
@@ -443,11 +441,7 @@ pub(crate) fn create_folds(n: usize, k: usize, seed: u64) -> Vec<Vec<usize>> {
 /// Within each stratum, observations are shuffled and distributed
 /// round-robin. This guarantees that each fold has approximately the same
 /// number of observations from each stratum.
-pub(crate) fn create_stratified_folds(
-    strata: &[usize],
-    k: usize,
-    seed: u64,
-) -> Vec<Vec<usize>> {
+pub(crate) fn create_stratified_folds(strata: &[usize], k: usize, seed: u64) -> Vec<Vec<usize>> {
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
 
     // Group indices by stratum
@@ -620,7 +614,7 @@ mod tests {
         let k = 5;
         let folds = create_folds(n, k, 42);
 
-        let min_size = n / k;       // 4
+        let min_size = n / k; // 4
         let max_size = min_size + 1; // 5
 
         for (i, fold) in folds.iter().enumerate() {
@@ -680,7 +674,7 @@ mod tests {
         let folds = create_stratified_folds(&strata, k, 42);
 
         for (fi, fold) in folds.iter().enumerate() {
-            let mut stratum_counts = vec![0usize; 3];
+            let mut stratum_counts = [0usize; 3];
             for &idx in fold {
                 stratum_counts[strata[idx]] += 1;
             }
@@ -806,7 +800,7 @@ mod tests {
 
         // True effects: mu=10, g1=+2, g2=0, g3=-2
         let genotype_assignment = vec![0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2];
-        let true_g = vec![2.0, 0.0, -2.0];
+        let true_g = [2.0, 0.0, -2.0];
         let mu = 10.0;
 
         // Use fixed errors for reproducibility (instead of random)
@@ -848,8 +842,11 @@ mod tests {
         assert_eq!(result.folds.len(), 3);
 
         // Total validation observations should equal n
-        let total_val: usize =
-            result.folds.iter().map(|f| f.validation_indices.len()).sum();
+        let total_val: usize = result
+            .folds
+            .iter()
+            .map(|f| f.validation_indices.len())
+            .sum();
         assert_eq!(total_val, n);
 
         // Summary should be non-empty
@@ -864,7 +861,7 @@ mod tests {
         let n = 12;
         let q = 3;
         let genotype_assignment = vec![0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2];
-        let true_g = vec![2.0, 0.0, -2.0];
+        let true_g = [2.0, 0.0, -2.0];
         let mu = 10.0;
         let errors = vec![
             0.3, -0.2, 0.1, -0.3, 0.2, -0.1, 0.15, -0.15, 0.05, -0.25, 0.25, -0.05,
@@ -897,12 +894,58 @@ mod tests {
     }
 
     #[test]
+    fn test_cv_stratified_run_uses_strata() {
+        // 4 groups x 5 obs; stratify by group so each fold sees every group.
+        let n = 20;
+        let q = 4;
+        let y: Vec<f64> = (0..n)
+            .map(|i| (i % q) as f64 * 2.0 + (i as f64) * 0.01)
+            .collect();
+        let mut x_tri = sprs::TriMat::new((n, 1));
+        let mut z_tri = sprs::TriMat::new((n, q));
+        for i in 0..n {
+            x_tri.add_triplet(i, 0, 1.0);
+            z_tri.add_triplet(i, i % q, 1.0);
+        }
+        let x = x_tri.to_csc();
+        let z = z_tri.to_csc();
+        let strata: Vec<usize> = (0..n).map(|i| i % q).collect();
+
+        let result = CrossValidator::new(5)
+            .seed(3)
+            .stratify_by(strata.clone())
+            .run(&y, &x, &z, None)
+            .unwrap();
+        assert_eq!(result.folds.len(), 5);
+        for fold in &result.folds {
+            assert_eq!(fold.validation_indices.len(), 4);
+            let mut groups: Vec<usize> =
+                fold.validation_indices.iter().map(|&i| strata[i]).collect();
+            groups.sort_unstable();
+            assert_eq!(groups, vec![0, 1, 2, 3]);
+        }
+
+        // Wrong strata length is rejected.
+        let err = CrossValidator::new(5)
+            .stratify_by(vec![0; n - 1])
+            .run(&y, &x, &z, None)
+            .unwrap_err();
+        assert!(matches!(err, LmmError::DimensionMismatch { .. }));
+    }
+
+    #[test]
     fn test_loocv_has_n_folds() {
         let n = 8;
         let q = 2;
-        let genotype_assignment = vec![0, 1, 0, 1, 0, 1, 0, 1];
+        let genotype_assignment = [0, 1, 0, 1, 0, 1, 0, 1];
         let y: Vec<f64> = (0..n)
-            .map(|i| 10.0 + if genotype_assignment[i] == 0 { 1.0 } else { -1.0 })
+            .map(|i| {
+                10.0 + if genotype_assignment[i] == 0 {
+                    1.0
+                } else {
+                    -1.0
+                }
+            })
             .collect();
 
         let mut x_tri = sprs::TriMat::new((n, 1));

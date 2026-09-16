@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # The workspace builds the PyO3 bindings, and PyO3 0.23 supports
+      # Python <= 3.13; don't depend on the runner's default interpreter.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build (default features)
+        run: cargo build --workspace
+      - name: Build core with gpu feature
+        run: cargo build -p plant-breeding-lmm-core --features gpu
+      - name: Test
+        run: cargo test --workspace
+      - name: Large-scale sparse MME test (release)
+        if: runner.os == 'Linux'
+        run: cargo test --release -p plant-breeding-lmm-core --test sparse_mme_test -- --ignored
+      - name: Docs
+        if: runner.os == 'Linux'
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc -p plant-breeding-lmm-core -p plant-breeding-lmm-cli -p openblup-wasm --no-deps
+      - name: Rust example
+        run: cargo run -p plant-breeding-lmm-core --example quick_start
+      - name: CLI smoke test
+        shell: bash
+        run: |
+          cargo run -q -p plant-breeding-lmm-cli -- fit \
+            --data examples/field_trial.csv --response yield \
+            --fixed "mu + rep" --factor rep --random genotype --format json > /dev/null
+          cargo run -q -p plant-breeding-lmm-cli -- fit \
+            --data examples/animal_records.csv --response weight \
+            --fixed sex --random animal --pedigree examples/animal_pedigree.csv
+          cargo run -q -p plant-breeding-lmm-cli -- fit \
+            --data examples/field_trial.csv --response yield \
+            --fixed "mu + rep" --factor rep --random genotype \
+            --residual "row:ar1*col:ar1c" --ddf satterthwaite --cv 3 > /dev/null
+          cargo run -q -p plant-breeding-lmm-cli -- fit \
+            --data examples/met_trial.csv --response yield \
+            --fixed "mu + env" --random "env:fa1*genotype" --format json > /dev/null
+          cargo run -q -p plant-breeding-lmm-cli -- ainverse \
+            --pedigree examples/mrode_pedigree.csv --inbreeding
+
+  wasm:
+    name: WebAssembly
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Build for wasm32
+        run: cargo build -p openblup-wasm --target wasm32-unknown-unknown --release
+      - name: Native tests of the wasm crate
+        run: cargo test -p openblup-wasm
+
+  python:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install maturin numpy scipy pandas pytest
+          python -m pip install .
+      - name: Test
+        run: python -m pytest python/tests -v

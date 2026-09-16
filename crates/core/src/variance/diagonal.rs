@@ -128,6 +128,16 @@ impl VarStruct for Diagonal {
         derivs
     }
 
+    fn fixed_dim(&self) -> Option<usize> {
+        Some(self.variances.len())
+    }
+
+    fn param_names(&self) -> Vec<String> {
+        (0..self.variances.len())
+            .map(|i| format!("sigma2_{}", i + 1))
+            .collect()
+    }
+
     fn bounds(&self) -> Vec<(f64, f64)> {
         vec![(1e-10, f64::INFINITY); self.variances.len()]
     }

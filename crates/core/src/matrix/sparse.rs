@@ -102,11 +102,7 @@ pub fn xtx_dense(x: &CsMat<f64>) -> nalgebra::DMatrix<f64> {
     let mut result = nalgebra::DMatrix::zeros(ncol, ncol);
 
     // For each pair of columns, compute their dot product
-    let x_csc = if x.is_csc() {
-        x.clone()
-    } else {
-        x.to_csc()
-    };
+    let x_csc = if x.is_csc() { x.clone() } else { x.to_csc() };
 
     for j in 0..ncol {
         let col_j = x_csc.outer_view(j);

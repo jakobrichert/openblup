@@ -1,5 +1,5 @@
 use crate::error::{LmmError, Result};
-use crate::matrix::sparse::{sparse_diagonal, sparse_identity};
+use crate::matrix::sparse::sparse_diagonal;
 use crate::types::SparseMat;
 
 use super::traits::VarStruct;
@@ -72,6 +72,10 @@ impl VarStruct for Identity {
 
     fn bounds(&self) -> Vec<(f64, f64)> {
         vec![(1e-10, f64::INFINITY)]
+    }
+
+    fn param_names(&self) -> Vec<String> {
+        vec!["sigma2".to_string()]
     }
 
     fn clone_boxed(&self) -> Box<dyn VarStruct> {

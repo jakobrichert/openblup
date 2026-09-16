@@ -1,3 +1,5 @@
+use nalgebra::DMatrix;
+
 use crate::lmm::FitResult;
 
 /// Result of a Wald F-test for a single fixed effect term.
@@ -27,9 +29,18 @@ pub struct WaldTest {
 /// to that term, `C^{-1}_{bb}` is the fixed-effects block of the inverse of the
 /// MME coefficient matrix, and `beta_hat` are the estimated fixed effects.
 ///
+/// For multi-level terms the full fixed-effects covariance block
+/// (`FitResult::fixed_cov`) is used, so correlated estimates (e.g. treatment
+/// contrasts against a common reference level) are handled exactly. If the
+/// covariance block is not available the test falls back to summing the
+/// independent squared t-statistics, which is exact only for orthogonal
+/// designs.
+///
 /// The denominator degrees of freedom use the simple containment method:
 /// `den_df = n - rank(X)`, which is appropriate for balanced designs and
-/// provides a conservative test for unbalanced designs.
+/// provides a conservative test for unbalanced designs. See
+/// [`wald_tests_satterthwaite`](crate::diagnostics::wald_tests_satterthwaite)
+/// for the Satterthwaite approximation.
 ///
 /// # Arguments
 ///
@@ -54,10 +65,7 @@ pub fn wald_tests(result: &FitResult) -> Vec<WaldTest> {
         if !term_indices.contains_key(&ef.term) {
             term_order.push(ef.term.clone());
         }
-        term_indices
-            .entry(ef.term.clone())
-            .or_default()
-            .push(i);
+        term_indices.entry(ef.term.clone()).or_default().push(i);
     }
 
     // Denominator df: containment method n - rank(X)
@@ -100,31 +108,39 @@ pub fn wald_tests(result: &FitResult) -> Vec<WaldTest> {
             }
         } else {
             // Multi-parameter term: general Wald F-test
-            // F = beta' (Var(beta))^{-1} beta / num_df
-            // where Var(beta) is the submatrix of C^{-1} for these indices.
-            //
-            // We only have the SEs (diagonal of C^{-1}) from FitResult.
-            // For the full Wald test with off-diagonal terms, we'd need the
-            // full C^{-1} submatrix. Since FitResult stores only diagonal SEs,
-            // we approximate using independent Wald statistics summed.
-            //
-            // Approximation: F = (1/num_df) * sum_i (beta_i / SE_i)^2
-            // This is exact when the off-diagonal elements of Var(beta) are zero
-            // (orthogonal design), and a reasonable approximation otherwise.
-            let f_stat: f64 = indices
+            //   F = beta' Var(beta)^- beta / rank(Var(beta))
+            // using the sub-block of the fixed-effects covariance matrix.
+            let beta: Vec<f64> = indices
                 .iter()
-                .map(|&idx| {
-                    let ef = &result.fixed_effects[idx];
-                    if ef.se > 0.0 {
-                        (ef.estimate / ef.se).powi(2)
-                    } else {
-                        0.0
-                    }
-                })
-                .sum::<f64>()
-                / num_df as f64;
+                .map(|&idx| result.fixed_effects[idx].estimate)
+                .collect();
 
-            let p_value = f_distribution_sf(f_stat, num_df as f64, den_df);
+            let (f_stat, rank) = match fixed_cov_block(result, indices) {
+                Some(cov) => wald_f_general(&beta, &cov),
+                None => {
+                    // Fallback without covariances: sum of independent t².
+                    let f: f64 = indices
+                        .iter()
+                        .map(|&idx| {
+                            let ef = &result.fixed_effects[idx];
+                            if ef.se > 0.0 {
+                                (ef.estimate / ef.se).powi(2)
+                            } else {
+                                0.0
+                            }
+                        })
+                        .sum::<f64>()
+                        / num_df as f64;
+                    (f, num_df)
+                }
+            };
+
+            let num_df = rank.max(1);
+            let p_value = if rank == 0 {
+                1.0
+            } else {
+                f_distribution_sf(f_stat, num_df as f64, den_df)
+            };
 
             tests.push(WaldTest {
                 term: term.clone(),
@@ -137,6 +153,60 @@ pub fn wald_tests(result: &FitResult) -> Vec<WaldTest> {
     }
 
     tests
+}
+
+/// Extract the covariance sub-block of `FitResult::fixed_cov` for the given
+/// effect indices, or `None` if the covariance matrix is unavailable.
+fn fixed_cov_block(result: &FitResult, indices: &[usize]) -> Option<DMatrix<f64>> {
+    let p = result.fixed_effects.len();
+    if result.fixed_cov.len() != p || result.fixed_cov.iter().any(|row| row.len() != p) {
+        return None;
+    }
+    let k = indices.len();
+    Some(DMatrix::from_fn(k, k, |a, b| {
+        result.fixed_cov[indices[a]][indices[b]]
+    }))
+}
+
+/// General Wald F-statistic for a vector of estimates with covariance `cov`:
+///
+/// ```text
+/// F = beta' cov^- beta / rank(cov)
+/// ```
+///
+/// `cov^-` is the Moore-Penrose pseudo-inverse obtained from the symmetric
+/// eigendecomposition, so (near-)singular covariance blocks (e.g. from a
+/// rank-deficient design) are handled by testing only the estimable
+/// directions. Returns `(F, rank)`; `rank` is 0 (and `F` is 0) when the
+/// covariance block is entirely singular.
+pub(crate) fn wald_f_general(beta: &[f64], cov: &DMatrix<f64>) -> (f64, usize) {
+    let k = beta.len();
+    if k == 0 || cov.nrows() != k || cov.ncols() != k {
+        return (0.0, 0);
+    }
+    // Symmetrise to guard against round-off asymmetry.
+    let sym = (cov + cov.transpose()) * 0.5;
+    let eig = sym.symmetric_eigen();
+    let max_eig = eig.eigenvalues.iter().cloned().fold(0.0_f64, f64::max);
+    if max_eig <= 0.0 {
+        return (0.0, 0);
+    }
+    let tol = max_eig * 1e-10;
+    let b = nalgebra::DVector::from_column_slice(beta);
+    let mut quad = 0.0;
+    let mut rank = 0;
+    for (i, &lambda) in eig.eigenvalues.iter().enumerate() {
+        if lambda > tol {
+            let proj = eig.eigenvectors.column(i).dot(&b);
+            quad += proj * proj / lambda;
+            rank += 1;
+        }
+    }
+    if rank == 0 {
+        (0.0, 0)
+    } else {
+        (quad / rank as f64, rank)
+    }
 }
 
 /// Survival function (1 - CDF) of the F distribution.
@@ -201,14 +271,14 @@ fn ln_beta(a: f64, b: f64) -> f64 {
 fn ln_gamma(x: f64) -> f64 {
     // Coefficients for the Lanczos approximation (g=7, n=9)
     const COEFFS: [f64; 9] = [
-        0.99999999999980993,
+        0.999_999_999_999_809_9,
         676.5203681218851,
         -1259.1392167224028,
-        771.32342877765313,
-        -176.61502916214059,
+        771.323_428_777_653_1,
+        -176.615_029_162_140_6,
         12.507343278686905,
         -0.13857109526572012,
-        9.9843695780195716e-6,
+        9.984_369_578_019_572e-6,
         1.5056327351493116e-7,
     ];
 
@@ -264,8 +334,8 @@ fn beta_cf(x: f64, a: f64, b: f64) -> f64 {
         f *= d * c;
 
         // Odd step: d_{2m+1}
-        let numerator_odd = -((a + m_f64) * (a + b + m_f64) * x)
-            / ((a + 2.0 * m_f64) * (a + 2.0 * m_f64 + 1.0));
+        let numerator_odd =
+            -((a + m_f64) * (a + b + m_f64) * x) / ((a + 2.0 * m_f64) * (a + 2.0 * m_f64 + 1.0));
         d = 1.0 + numerator_odd * d;
         if d.abs() < tiny {
             d = tiny;
@@ -381,9 +451,16 @@ mod tests {
             history: vec![],
             variance_se: vec![],
             residuals: vec![],
+            fixed_cov: vec![],
+            at_boundary: vec![],
             n_obs: 10,
             n_fixed_params: 0,
             n_variance_params: 0,
+            c_inv: None,
+            fixed_cov_derivatives: Vec::new(),
+            kenward_roger_terms: None,
+            ai_matrix: None,
+            n_random_per_term: vec![],
         };
 
         let tests = wald_tests(&result);
@@ -399,6 +476,8 @@ mod tests {
                 name: "residual".to_string(),
                 structure: "Identity".to_string(),
                 parameters: vec![("sigma2".to_string(), 1.0)],
+                se: vec![],
+                at_boundary: vec![],
             }],
             fixed_effects: vec![NamedEffect {
                 term: "mu".to_string(),
@@ -413,9 +492,16 @@ mod tests {
             history: vec![],
             variance_se: vec![0.1],
             residuals: vec![],
+            fixed_cov: vec![],
+            at_boundary: vec![],
             n_obs: 20,
             n_fixed_params: 1,
             n_variance_params: 1,
+            c_inv: None,
+            fixed_cov_derivatives: Vec::new(),
+            kenward_roger_terms: None,
+            ai_matrix: None,
+            n_random_per_term: vec![],
         };
 
         let tests = wald_tests(&result);
@@ -439,6 +525,8 @@ mod tests {
                 name: "residual".to_string(),
                 structure: "Identity".to_string(),
                 parameters: vec![("sigma2".to_string(), 1.0)],
+                se: vec![],
+                at_boundary: vec![],
             }],
             fixed_effects: vec![
                 NamedEffect {
@@ -467,9 +555,16 @@ mod tests {
             history: vec![],
             variance_se: vec![0.1],
             residuals: vec![],
+            fixed_cov: vec![],
+            at_boundary: vec![],
             n_obs: 30,
             n_fixed_params: 3,
             n_variance_params: 1,
+            c_inv: None,
+            fixed_cov_derivatives: Vec::new(),
+            kenward_roger_terms: None,
+            ai_matrix: None,
+            n_random_per_term: vec![],
         };
 
         let tests = wald_tests(&result);
@@ -483,6 +578,99 @@ mod tests {
         assert_eq!(tests[1].term, "trt");
         assert_eq!(tests[1].num_df, 2);
         assert!((tests[1].den_df - 27.0).abs() < 1e-10); // 30 - 3 = 27
+    }
+
+    #[test]
+    fn test_wald_f_general_diagonal_matches_sum_of_t2() {
+        let beta = [2.0, -1.0];
+        let cov = DMatrix::from_row_slice(2, 2, &[4.0, 0.0, 0.0, 1.0]);
+        let (f, rank) = wald_f_general(&beta, &cov);
+        // (2/2)^2 + (-1/1)^2 = 2, divided by rank 2
+        assert!((f - 1.0).abs() < 1e-12);
+        assert_eq!(rank, 2);
+    }
+
+    #[test]
+    fn test_wald_f_general_uses_covariances() {
+        // Strongly correlated estimates: the quadratic form differs from the
+        // diagonal approximation.
+        let beta = [1.0, 1.0];
+        let cov = DMatrix::from_row_slice(2, 2, &[1.0, 0.9, 0.9, 1.0]);
+        let (f, rank) = wald_f_general(&beta, &cov);
+        // cov^-1 = 1/(1-0.81) * [[1,-0.9],[-0.9,1]]; b'cov^-1 b = 2*(1-0.9)/0.19
+        let expected = 2.0 * 0.1 / 0.19 / 2.0;
+        assert!((f - expected).abs() < 1e-10, "f = {}", f);
+        assert_eq!(rank, 2);
+    }
+
+    #[test]
+    fn test_wald_f_general_singular_block_reduces_rank() {
+        let beta = [1.0, 1.0];
+        let cov = DMatrix::from_row_slice(2, 2, &[1.0, 1.0, 1.0, 1.0]);
+        let (f, rank) = wald_f_general(&beta, &cov);
+        assert_eq!(rank, 1);
+        // Only the direction (1,1)/sqrt(2) with eigenvalue 2: proj = sqrt(2)
+        assert!((f - 1.0).abs() < 1e-10);
+        let (f0, rank0) = wald_f_general(&beta, &DMatrix::zeros(2, 2));
+        assert_eq!(rank0, 0);
+        assert_eq!(f0, 0.0);
+    }
+
+    #[test]
+    fn test_wald_tests_multi_level_term_uses_fixed_cov() {
+        use crate::lmm::NamedEffect;
+        let cov = vec![
+            vec![1.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.9],
+            vec![0.0, 0.9, 1.0],
+        ];
+        let result = FitResult {
+            variance_components: vec![],
+            fixed_effects: vec![
+                NamedEffect {
+                    term: "mu".into(),
+                    level: "intercept".into(),
+                    estimate: 5.0,
+                    se: 1.0,
+                },
+                NamedEffect {
+                    term: "rep".into(),
+                    level: "R2".into(),
+                    estimate: 1.0,
+                    se: 1.0,
+                },
+                NamedEffect {
+                    term: "rep".into(),
+                    level: "R3".into(),
+                    estimate: 1.0,
+                    se: 1.0,
+                },
+            ],
+            random_effects: vec![],
+            log_likelihood: 0.0,
+            n_iterations: 1,
+            converged: true,
+            history: vec![],
+            variance_se: vec![],
+            residuals: vec![],
+            fixed_cov: cov,
+            at_boundary: vec![],
+            n_obs: 20,
+            n_fixed_params: 3,
+            n_variance_params: 1,
+            c_inv: None,
+            fixed_cov_derivatives: Vec::new(),
+            kenward_roger_terms: None,
+            ai_matrix: None,
+            n_random_per_term: vec![],
+        };
+        let tests = wald_tests(&result);
+        assert_eq!(tests.len(), 2);
+        let rep = tests.iter().find(|t| t.term == "rep").unwrap();
+        assert_eq!(rep.num_df, 2);
+        let expected = 2.0 * 0.1 / 0.19 / 2.0;
+        assert!((rep.f_statistic - expected).abs() < 1e-10);
+        assert!(rep.p_value > 0.0 && rep.p_value < 1.0);
     }
 
     #[test]
@@ -509,6 +697,6 @@ mod tests {
         assert!(output.contains("mu"));
         assert!(output.contains("treatment"));
         assert!(output.contains("***")); // mu should be highly significant
-        assert!(output.contains("*"));   // treatment should be significant at 0.05
+        assert!(output.contains("*")); // treatment should be significant at 0.05
     }
 }

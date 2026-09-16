@@ -2,10 +2,8 @@ use crate::error::{LmmError, Result};
 use crate::matrix::sparse::spmv;
 use crate::model::MixedModel;
 
-use super::mme::MixedModelEquations;
-use super::result::{
-    FitResult, NamedEffect, RandomEffectBlock, RemlIteration, VarianceEstimate,
-};
+use super::mme::SparseMixedModelEquations;
+use super::result::{FitResult, NamedEffect, RandomEffectBlock, RemlIteration, VarianceEstimate};
 
 /// REML engine using EM algorithm for variance component estimation.
 ///
@@ -27,7 +25,18 @@ impl EmReml {
     }
 
     /// Fit the model using EM-REML.
+    ///
+    /// EM updates exist only for scaled identity / relationship-matrix terms
+    /// with an IID residual; other structures need AI-REML.
     pub fn fit(&self, model: &mut MixedModel) -> Result<FitResult> {
+        if model.needs_general_engine() {
+            return Err(LmmError::ModelSpec(
+                "EM-REML only supports scaled identity/relationship-matrix random terms with an \
+                 IID residual; use AI-REML (fit_reml) for AR1, FA, Diagonal, Unstructured, \
+                 interaction or structured-residual models"
+                    .into(),
+            ));
+        }
         let n = model.n_obs;
         let n_random_terms = model.random_var_structs.len();
 
@@ -83,7 +92,7 @@ impl EmReml {
             let r_inv_scale = 1.0 / sigma2_e;
 
             // Assemble and solve MME
-            let mme = MixedModelEquations::assemble(
+            let mme = SparseMixedModelEquations::assemble(
                 &model.x,
                 &model.z_blocks,
                 &model.y,
@@ -93,9 +102,7 @@ impl EmReml {
 
             let sol = mme.solve()?;
 
-            let c_inv = sol.c_inv.as_ref().ok_or(LmmError::CholeskyFailed(
-                "C^{-1} not available".into(),
-            ))?;
+            let c_inv = sol.inverse()?;
 
             // Save old params for convergence check
             let old_sigma2_random = sigma2_random.clone();
@@ -137,7 +144,10 @@ impl EmReml {
                 let u_quadratic = if let Some(ref ginv_k) = model.ginv_matrices[k] {
                     // ginv_k = K^{-1}, so u'K^{-1}u
                     let kinv_u = spmv(ginv_k, u_k);
-                    u_k.iter().zip(kinv_u.iter()).map(|(a, b)| a * b).sum::<f64>()
+                    u_k.iter()
+                        .zip(kinv_u.iter())
+                        .map(|(a, b)| a * b)
+                        .sum::<f64>()
                 } else {
                     // K = I, so u'u
                     u_k.iter().map(|u| u * u).sum::<f64>()
@@ -146,23 +156,12 @@ impl EmReml {
                 // tr(K_k^{-1} C^{-1}_{uu_k})
                 let trace_term = if let Some(ref ginv_k) = model.ginv_matrices[k] {
                     // tr(K^{-1} C^{-1}_{uu}) = sum_{i,j} K^{-1}_{ij} C^{-1}_{uu,ji}
-                    // For efficiency in Phase 1, use the full matrices
-                    let mut tr = 0.0;
-                    for i in 0..q_k {
-                        for j in 0..q_k {
-                            let kinv_ij = ginv_k.get(i, j).copied().unwrap_or(0.0);
-                            let cinv_ji = c_inv[(block_start + j, block_start + i)];
-                            tr += kinv_ij * cinv_ji;
-                        }
-                    }
-                    tr
+                    c_inv.trace_block(ginv_k, block_start)
                 } else {
                     // K = I, so tr(C^{-1}_{uu}) = sum of diagonal
-                    let mut tr = 0.0;
-                    for i in 0..q_k {
-                        tr += c_inv[(block_start + i, block_start + i)];
-                    }
-                    tr
+                    sol.c_inv_diag[block_start..block_start + q_k]
+                        .iter()
+                        .sum::<f64>()
                 };
 
                 sigma2_random[k] = ((u_quadratic + trace_term) / q_k as f64).max(1e-10);
@@ -187,8 +186,7 @@ impl EmReml {
                 log_det_g += q as f64 * old_sigma2_random[k].ln();
             }
             let log_2_pi = (2.0 * std::f64::consts::PI).ln();
-            let logl =
-                -0.5 * (n_eff * log_2_pi + log_det_r + log_det_g + sol.log_det_c + y_p_y);
+            let logl = -0.5 * (n_eff * log_2_pi + log_det_r + log_det_g + sol.log_det_c + y_p_y);
 
             // Convergence criterion: relative change in parameters
             let mut all_params_old = old_sigma2_random.clone();
@@ -241,7 +239,7 @@ impl EmReml {
             .collect();
 
         let r_inv_scale = 1.0 / sigma2_e;
-        let mme = MixedModelEquations::assemble(
+        let mme = SparseMixedModelEquations::assemble(
             &model.x,
             &model.z_blocks,
             &model.y,
@@ -261,7 +259,7 @@ impl EmReml {
         &self,
         model: &MixedModel,
         sol: &super::mme::MmeSolution,
-        mme: &MixedModelEquations,
+        mme: &SparseMixedModelEquations,
         var_params: &[f64],
         history: &[RemlIteration],
         converged: bool,
@@ -298,16 +296,24 @@ impl EmReml {
                 name: model.random_term_names[k].clone(),
                 structure: vs.name().to_string(),
                 parameters: vec![("sigma2".to_string(), vs.params()[0])],
+                se: vec![0.0],
+                at_boundary: vec![false],
             });
         }
         variance_components.push(VarianceEstimate {
             name: "residual".to_string(),
             structure: model.residual_var_struct.name().to_string(),
             parameters: vec![("sigma2".to_string(), sigma_e2)],
+            se: vec![0.0],
+            at_boundary: vec![false],
         });
 
         // Fixed effects with SEs from C^{-1}
-        let c_inv = sol.c_inv.as_ref().unwrap();
+        let c_inv = sol.inverse()?;
+        let fixed_block = c_inv.fixed_block(n_fixed);
+        let fixed_cov: Vec<Vec<f64>> = (0..n_fixed)
+            .map(|i| (0..n_fixed).map(|j| fixed_block[(i, j)]).collect())
+            .collect();
         let fixed_effects: Vec<NamedEffect> = model
             .fixed_labels
             .iter()
@@ -316,7 +322,7 @@ impl EmReml {
                 term: label.term.clone(),
                 level: label.level.clone(),
                 estimate: sol.fixed_effects[i],
-                se: c_inv[(i, i)].sqrt(),
+                se: sol.c_inv_diag[i].sqrt(),
             })
             .collect();
 
@@ -331,7 +337,7 @@ impl EmReml {
                     term: model.random_term_names[k].clone(),
                     level: level_name.clone(),
                     estimate: sol.random_effects[k][j],
-                    se: c_inv[(block_offset + j, block_offset + j)].sqrt(),
+                    se: sol.c_inv_diag[block_offset + j].sqrt(),
                 })
                 .collect();
             random_effects.push(RandomEffectBlock {
@@ -370,9 +376,16 @@ impl EmReml {
             history: history.to_vec(),
             variance_se: vec![0.0; var_params.len()],
             residuals,
+            fixed_cov,
+            at_boundary: vec![false; var_params.len()],
             n_obs: n,
             n_fixed_params: n_fixed,
             n_variance_params: var_params.len(),
+            c_inv: sol.c_inv.clone(),
+            fixed_cov_derivatives: Vec::new(),
+            kenward_roger_terms: None,
+            ai_matrix: None,
+            n_random_per_term: model.z_blocks.iter().map(|z| z.cols()).collect(),
         })
     }
 }

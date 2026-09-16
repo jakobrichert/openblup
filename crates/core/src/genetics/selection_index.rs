@@ -163,9 +163,7 @@ impl SelectionIndex {
 
         let r = restricted_traits.len();
         if r >= t {
-            return Err(LmmError::ModelSpec(
-                "Cannot restrict all traits".into(),
-            ));
+            return Err(LmmError::ModelSpec("Cannot restrict all traits".into()));
         }
 
         // C is t × r: columns are unit vectors selecting restricted traits
@@ -182,7 +180,6 @@ impl SelectionIndex {
         // Restricted: b = b₀ - P⁻¹G C (C'G P⁻¹G C)⁻¹ C'G b₀
         // This ensures C'G b = 0 (zero genetic gain on restricted traits)
         let pinvg = &p_inv * &g_matrix;
-        let gc = &g_matrix * &c_mat;
         let ct_g_pinvg_c = c_mat.transpose() * &g_matrix * &pinvg * &c_mat;
 
         let inner_inv = ct_g_pinvg_c
@@ -214,7 +211,10 @@ impl SelectionIndex {
         s.push_str(&format!("Index variance: {:.4}\n\n", self.index_variance()));
 
         s.push_str("Economic weights and index coefficients:\n");
-        s.push_str(&format!("{:<10} {:>12} {:>12}\n", "Trait", "Weight", "Coeff"));
+        s.push_str(&format!(
+            "{:<10} {:>12} {:>12}\n",
+            "Trait", "Weight", "Coeff"
+        ));
         for i in 0..self.n_traits {
             s.push_str(&format!(
                 "{:<10} {:>12.4} {:>12.4}\n",
@@ -225,9 +225,7 @@ impl SelectionIndex {
         }
 
         let gain = self.expected_genetic_gain(1.4); // i ≈ 1.4 for top 20%
-        s.push_str(&format!(
-            "\nExpected genetic gain (i=1.4, top 20%):\n"
-        ));
+        s.push_str("\nExpected genetic gain (i=1.4, top 20%):\n");
         for (i, g) in gain.iter().enumerate() {
             s.push_str(&format!("  Trait_{}: {:.4}\n", i + 1, g));
         }
@@ -351,18 +349,24 @@ mod tests {
     #[test]
     fn test_restricted_index() {
         let (g, p) = test_matrices();
-        let idx = SelectionIndex::restricted_index(
-            g.clone(), p.clone(), vec![1.0, 1.0], &[1],
-        ).unwrap();
+        let idx =
+            SelectionIndex::restricted_index(g.clone(), p.clone(), vec![1.0, 1.0], &[1]).unwrap();
 
         // The restriction means C'Gb = 0 for the restricted trait
         // i.e., row 1 of G*b should be zero
         let b = nalgebra::DVector::from_column_slice(idx.coefficients());
         let gb = &g * &b;
-        assert!(gb[1].abs() < 1e-8, "restricted trait Gb should be zero: {}", gb[1]);
+        assert!(
+            gb[1].abs() < 1e-8,
+            "restricted trait Gb should be zero: {}",
+            gb[1]
+        );
 
         // Unrestricted trait should still have positive response
-        assert!(gb[0] > 0.0, "unrestricted trait should have positive response");
+        assert!(
+            gb[0] > 0.0,
+            "unrestricted trait should have positive response"
+        );
     }
 
     #[test]

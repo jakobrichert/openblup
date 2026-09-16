@@ -5,12 +5,48 @@ use crate::error::{LmmError, Result};
 use super::dataframe::{Column, DataFrame};
 use super::factor::FactorColumn;
 
+/// Markers that denote a missing value in a numeric CSV column.
+fn is_missing_marker(s: &str) -> bool {
+    s.is_empty()
+        || s == "."
+        || s.eq_ignore_ascii_case("na")
+        || s.eq_ignore_ascii_case("nan")
+        || s.eq_ignore_ascii_case("null")
+}
+
+/// Try to interpret a raw string column as numeric.
+///
+/// Returns `None` if any non-missing value fails to parse, or if the column
+/// has no non-missing values at all (an all-missing column is treated as a
+/// factor so that the caller can still inspect it).
+fn parse_numeric_column(raw: &[String]) -> Option<Vec<f64>> {
+    let mut values = Vec::with_capacity(raw.len());
+    let mut n_present = 0usize;
+    for s in raw {
+        if is_missing_marker(s) {
+            values.push(f64::NAN);
+        } else {
+            values.push(s.parse::<f64>().ok()?);
+            n_present += 1;
+        }
+    }
+    if n_present == 0 {
+        None
+    } else {
+        Some(values)
+    }
+}
+
 impl DataFrame {
     /// Read a CSV file into a DataFrame.
     ///
     /// The first row is treated as a header. Each column is auto-detected:
-    /// - If **every** value in the column parses as `f64`, it becomes a `Float` column.
-    /// - Otherwise it becomes a `Factor` column (categorical).
+    /// - If every **non-missing** value in the column parses as `f64`, it
+    ///   becomes a `Float` column. Missing values (`NA`, `NaN`, `null`, `.`
+    ///   or an empty field, case-insensitive) are stored as `NaN`; drop them
+    ///   with [`DataFrame::drop_missing`] before fitting a model.
+    /// - Otherwise it becomes a `Factor` column (categorical). Missing markers
+    ///   in factor columns are kept as ordinary level names.
     ///
     /// Integer columns are stored as `Float` because CSV numeric detection
     /// uses `f64::parse`; callers can convert to `Integer` or `Factor` as needed
@@ -36,11 +72,7 @@ impl DataFrame {
             .from_path(path)?;
 
         // Collect headers.
-        let headers: Vec<String> = reader
-            .headers()?
-            .iter()
-            .map(|h| h.to_string())
-            .collect();
+        let headers: Vec<String> = reader.headers()?.iter().map(|h| h.to_string()).collect();
 
         if headers.is_empty() {
             return Ok(DataFrame::new());
@@ -82,15 +114,12 @@ impl DataFrame {
         for (col_idx, header) in headers.iter().enumerate() {
             let raw = &string_columns[col_idx];
 
-            // Try to parse every value as f64.
-            let float_values: std::result::Result<Vec<f64>, _> =
-                raw.iter().map(|s| s.parse::<f64>()).collect();
-
-            match float_values {
-                Ok(values) => {
+            // Numeric column if every non-missing value parses as f64.
+            match parse_numeric_column(raw) {
+                Some(values) => {
                     df.add_float_column(header, values)?;
                 }
-                Err(_) => {
+                None => {
                     // Fall back to factor column.
                     let str_refs: Vec<&str> = raw.iter().map(|s| s.as_str()).collect();
                     let factor = FactorColumn::new(&str_refs);
@@ -198,19 +227,34 @@ mod tests {
     }
 
     #[test]
-    fn test_from_csv_mixed_makes_factor() {
-        // A column with mixed numeric and string values should become Factor.
-        let csv = "id,value\n1,10.5\n2,NA\n3,7.3\n";
+    fn test_from_csv_numeric_with_na_is_float_with_nan() {
+        let csv = "id,value\n1,10.5\n2,NA\n3,7.3\n4,\n5,.\n";
         let path = write_temp_csv(csv);
         let df = DataFrame::from_csv(&path).unwrap();
+
+        let val = df.get_float("value").unwrap();
+        assert_eq!(val.len(), 5);
+        assert_eq!(val[0], 10.5);
+        assert!(val[1].is_nan());
+        assert_eq!(val[2], 7.3);
+        assert!(val[3].is_nan());
+        assert!(val[4].is_nan());
+        assert!(df.has_missing("value").unwrap());
+
+        let clean = df.drop_missing("value").unwrap();
+        assert_eq!(clean.nrows(), 2);
+        assert_eq!(clean.get_float("id").unwrap(), &[1.0, 3.0]);
         std::fs::remove_file(&path).ok();
+    }
 
-        // "id" is all numeric -> Float
-        assert!(df.get_float("id").is_ok());
-
-        // "value" has "NA" -> not all f64 -> Factor
+    #[test]
+    fn test_from_csv_text_column_is_factor() {
+        let csv = "id,value\n1,low\n2,NA\n3,high\n";
+        let path = write_temp_csv(csv);
+        let df = DataFrame::from_csv(&path).unwrap();
         let val = df.get_factor("value").unwrap();
-        assert_eq!(val.n_levels(), 3); // "10.5", "NA", "7.3"
+        assert_eq!(val.n_levels(), 3); // "low", "NA", "high"
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

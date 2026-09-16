@@ -10,10 +10,13 @@ use super::traits::VarStruct;
 ///
 /// Parameters: the k*(k+1)/2 elements of L stored column-major in the lower triangle.
 /// For a k x k covariance matrix:
-///   params = [L[0,0], L[1,0], L[2,0], ..., L[k-1,0],   // column 0
-///             L[1,1], L[2,1], ..., L[k-1,1],              // column 1
-///             ...
-///             L[k-1,k-1]]                                  // column k-1
+///
+/// ```text
+/// params = [L[0,0], L[1,0], L[2,0], ..., L[k-1,0],   // column 0
+///           L[1,1], L[2,1], ..., L[k-1,1],           // column 1
+///           ...
+///           L[k-1,k-1]]                              // column k-1
+/// ```
 ///
 /// This parameterization guarantees positive definiteness as long as diagonal
 /// elements of L are positive.
@@ -229,43 +232,86 @@ impl VarStruct for Unstructured {
             "Unstructured dim mismatch: structure has dim={} but dim={} requested",
             self.dim, dim
         );
-
         let k = self.dim;
-        let n_params = self.chol_params.len();
-        let eps = 1e-7;
-
-        // Use numerical differentiation for the Cholesky parameterization.
-        // For small dimensions (2-10 traits), this is perfectly efficient.
-        let mut derivs = Vec::with_capacity(n_params);
-
-        for p in 0..n_params {
-            let mut params_plus = self.chol_params.clone();
-            let mut params_minus = self.chol_params.clone();
-            params_plus[p] += eps;
-            params_minus[p] -= eps;
-
-            let us_plus = Unstructured::new(k, params_plus);
-            let us_minus = Unstructured::new(k, params_minus);
-
-            let inv_plus = us_plus.inverse_covariance_matrix(k);
-            let inv_minus = us_minus.inverse_covariance_matrix(k);
-
-            let mut tri = TriMat::new((k, k));
-            // Central difference
-            for i in 0..k {
-                for j in 0..k {
-                    let val_plus = get_entry(&inv_plus, i, j);
-                    let val_minus = get_entry(&inv_minus, i, j);
-                    let deriv = (val_plus - val_minus) / (2.0 * eps);
-                    if deriv.abs() > 1e-15 {
-                        tri.add_triplet(i, j, deriv);
+        let inv = {
+            let m = self.inverse_covariance_matrix(k);
+            let mut d = vec![vec![0.0; k]; k];
+            for (v, (a, b)) in m.iter() {
+                d[a][b] = *v;
+            }
+            d
+        };
+        // dSigma^-1/dtheta = -Sigma^-1 (dSigma/dtheta) Sigma^-1
+        self.derivatives_of_covariance(dim)
+            .iter()
+            .map(|d| {
+                let mut dd = vec![vec![0.0; k]; k];
+                for (v, (a, b)) in d.iter() {
+                    dd[a][b] = *v;
+                }
+                let mut tmp = vec![vec![0.0; k]; k];
+                for a in 0..k {
+                    for b in 0..k {
+                        let mut acc = 0.0;
+                        for c in 0..k {
+                            acc += inv[a][c] * dd[c][b];
+                        }
+                        tmp[a][b] = acc;
                     }
                 }
-            }
-            derivs.push(tri.to_csc());
-        }
+                let mut tri = TriMat::new((k, k));
+                for a in 0..k {
+                    for b in 0..k {
+                        let mut acc = 0.0;
+                        for c in 0..k {
+                            acc += tmp[a][c] * inv[c][b];
+                        }
+                        if acc.abs() > 1e-300 {
+                            tri.add_triplet(a, b, -acc);
+                        }
+                    }
+                }
+                tri.to_csc()
+            })
+            .collect()
+    }
 
-        derivs
+    fn derivatives_of_covariance(&self, dim: usize) -> Vec<SparseMat> {
+        assert_eq!(dim, self.dim, "Unstructured dim mismatch");
+        let k = self.dim;
+        let l = self.cholesky_factor();
+        // Parameter order: column-major lower triangle of L.
+        let mut out = Vec::with_capacity(self.chol_params.len());
+        for col in 0..k {
+            for row in col..k {
+                // dSigma/dL[row,col] = E_{row,col} L' + L E_{row,col}'
+                // (E L')[a, b] = delta_{a,row} L[b, col]; (L E')[a, b] = L[a, col] delta_{b,row}
+                let mut tri = TriMat::new((k, k));
+                for b in 0..k {
+                    let v = l[b][col];
+                    if v != 0.0 {
+                        tri.add_triplet(row, b, v);
+                        tri.add_triplet(b, row, v);
+                    }
+                }
+                out.push(tri.to_csc());
+            }
+        }
+        out
+    }
+
+    fn fixed_dim(&self) -> Option<usize> {
+        Some(self.dim)
+    }
+
+    fn param_names(&self) -> Vec<String> {
+        let mut names = Vec::with_capacity(self.chol_params.len());
+        for col in 0..self.dim {
+            for row in col..self.dim {
+                names.push(format!("L_{}_{}", row + 1, col + 1));
+            }
+        }
+        names
     }
 
     fn bounds(&self) -> Vec<(f64, f64)> {
@@ -281,6 +327,19 @@ impl VarStruct for Unstructured {
         bounds
     }
 
+    /// The diagonal entries of `L` are standard deviations (of the
+    /// conditional distributions), not variances.
+    fn is_standard_deviation_param(&self, i: usize) -> bool {
+        let mut idx = 0;
+        for col in 0..self.dim {
+            if idx == i {
+                return true;
+            }
+            idx += self.dim - col;
+        }
+        false
+    }
+
     fn clone_boxed(&self) -> Box<dyn VarStruct> {
         Box::new(self.clone())
     }
@@ -290,14 +349,10 @@ impl VarStruct for Unstructured {
     }
 }
 
-/// Get an entry from a sparse matrix, returning 0 if absent.
+/// Entry `(row, col)` of a sparse matrix (0 if structurally absent).
+#[cfg(test)]
 fn get_entry(mat: &SparseMat, row: usize, col: usize) -> f64 {
-    for (&val, (r, c)) in mat.iter() {
-        if r == row && c == col {
-            return val;
-        }
-    }
-    0.0
+    mat.get(row, col).copied().unwrap_or(0.0)
 }
 
 #[cfg(test)]

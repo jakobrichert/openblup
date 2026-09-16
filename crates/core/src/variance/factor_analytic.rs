@@ -28,18 +28,31 @@ pub struct FactorAnalytic {
 impl FactorAnalytic {
     /// Create a new FA(k) structure for `n_env` environments with `n_factors` factors.
     pub fn new(n_env: usize, n_factors: usize) -> Self {
-        assert!(n_factors > 0 && n_factors <= n_env, "n_factors must be in [1, n_env]");
+        assert!(
+            n_factors > 0 && n_factors <= n_env,
+            "n_factors must be in [1, n_env]"
+        );
         // Default: small loadings, unit specific variances
         let loadings = vec![0.1; n_env * n_factors];
         let psi = vec![1.0; n_env];
-        Self { n_env, n_factors, loadings, psi }
+        Self {
+            n_env,
+            n_factors,
+            loadings,
+            psi,
+        }
     }
 
     /// Create from explicit loadings and specific variances.
     pub fn from_params(n_env: usize, n_factors: usize, loadings: Vec<f64>, psi: Vec<f64>) -> Self {
         assert_eq!(loadings.len(), n_env * n_factors);
         assert_eq!(psi.len(), n_env);
-        Self { n_env, n_factors, loadings, psi }
+        Self {
+            n_env,
+            n_factors,
+            loadings,
+            psi,
+        }
     }
 
     /// Get loading λ_{i,j} (environment i, factor j).
@@ -186,7 +199,10 @@ impl VarStruct for FactorAnalytic {
         if params.len() != expected {
             return Err(LmmError::InvalidParameter(format!(
                 "FA({}) with {} envs expects {} parameters, got {}",
-                self.n_factors, self.n_env, expected, params.len()
+                self.n_factors,
+                self.n_env,
+                expected,
+                params.len()
             )));
         }
         let n_load = self.n_env * self.n_factors;
@@ -196,7 +212,8 @@ impl VarStruct for FactorAnalytic {
         for (i, &v) in self.psi.iter().enumerate() {
             if v <= 0.0 {
                 return Err(LmmError::InvalidParameter(format!(
-                    "Specific variance ψ_{} must be positive, got {}", i, v
+                    "Specific variance ψ_{} must be positive, got {}",
+                    i, v
                 )));
             }
         }
@@ -260,43 +277,93 @@ impl VarStruct for FactorAnalytic {
 
     fn derivatives_of_inverse(&self, dim: usize) -> Vec<SparseMat> {
         assert_eq!(dim, self.n_env);
-        let n_params = self.n_params();
-        let eps = 1e-7;
-        let mut derivs = Vec::with_capacity(n_params);
-
-        for p_idx in 0..n_params {
-            let mut params_plus = self.params();
-            let mut params_minus = self.params();
-            params_plus[p_idx] += eps;
-            params_minus[p_idx] -= eps;
-
-            let fa_plus = FactorAnalytic::from_params(
-                self.n_env, self.n_factors,
-                params_plus[..self.n_env * self.n_factors].to_vec(),
-                params_plus[self.n_env * self.n_factors..].to_vec(),
-            );
-            let fa_minus = FactorAnalytic::from_params(
-                self.n_env, self.n_factors,
-                params_minus[..self.n_env * self.n_factors].to_vec(),
-                params_minus[self.n_env * self.n_factors..].to_vec(),
-            );
-
-            // Ensure positive specific variances for perturbed params
-            let inv_plus = fa_plus.sigma_inv_dense();
-            let inv_minus = fa_minus.sigma_inv_dense();
-
-            let mut tri = TriMat::new((dim, dim));
-            for i in 0..dim {
-                for j in 0..dim {
-                    let d = (inv_plus[i][j] - inv_minus[i][j]) / (2.0 * eps);
-                    if d.abs() > 1e-15 {
-                        tri.add_triplet(i, j, d);
+        // dSigma^-1/dtheta = -Sigma^-1 (dSigma/dtheta) Sigma^-1, with the exact
+        // dSigma/dtheta from `derivatives_of_covariance`.
+        let inv = self.sigma_inv_dense();
+        let p = self.n_env;
+        self.derivatives_of_covariance(dim)
+            .iter()
+            .map(|d| {
+                let mut dd = vec![vec![0.0; p]; p];
+                for (v, (a, b)) in d.iter() {
+                    dd[a][b] = *v;
+                }
+                // -inv * dd * inv
+                let mut tmp = vec![vec![0.0; p]; p];
+                for a in 0..p {
+                    for b in 0..p {
+                        let mut acc = 0.0;
+                        for c in 0..p {
+                            acc += inv[a][c] * dd[c][b];
+                        }
+                        tmp[a][b] = acc;
                     }
                 }
+                let mut tri = TriMat::new((p, p));
+                for a in 0..p {
+                    for b in 0..p {
+                        let mut acc = 0.0;
+                        for c in 0..p {
+                            acc += tmp[a][c] * inv[c][b];
+                        }
+                        if acc.abs() > 1e-300 {
+                            tri.add_triplet(a, b, -acc);
+                        }
+                    }
+                }
+                tri.to_csc()
+            })
+            .collect()
+    }
+
+    fn derivatives_of_covariance(&self, dim: usize) -> Vec<SparseMat> {
+        assert_eq!(dim, self.n_env);
+        let p = self.n_env;
+        let k = self.n_factors;
+        let mut out = Vec::with_capacity(self.n_params());
+        // dSigma/dlambda_{i,f} = e_i lambda_f' + lambda_f e_i'
+        for f in 0..k {
+            for i in 0..p {
+                let mut tri = TriMat::new((p, p));
+                for j in 0..p {
+                    let v = self.loading(j, f);
+                    if v != 0.0 || i == j {
+                        // entry (i, j) gets lambda_{j,f}; entry (j, i) gets lambda_{j,f}
+                        if i == j {
+                            tri.add_triplet(i, i, 2.0 * v);
+                        } else {
+                            tri.add_triplet(i, j, v);
+                            tri.add_triplet(j, i, v);
+                        }
+                    }
+                }
+                out.push(tri.to_csc());
             }
-            derivs.push(tri.to_csc());
         }
-        derivs
+        // dSigma/dpsi_i = e_i e_i'
+        for i in 0..p {
+            let mut tri = TriMat::new((p, p));
+            tri.add_triplet(i, i, 1.0);
+            out.push(tri.to_csc());
+        }
+        out
+    }
+
+    fn fixed_dim(&self) -> Option<usize> {
+        Some(self.n_env)
+    }
+
+    fn param_names(&self) -> Vec<String> {
+        let mut names = Vec::with_capacity(self.n_params());
+        for f in 0..self.n_factors {
+            for i in 0..self.n_env {
+                names.push(format!("lambda_{}_{}", i + 1, f + 1));
+            }
+        }
+        for i in 0..self.n_env {
+            names.push(format!("psi_{}", i + 1));
+        }
+        names
     }
 
     fn bounds(&self) -> Vec<(f64, f64)> {
@@ -434,7 +501,8 @@ mod tests {
     #[test]
     fn test_fa2_inverse() {
         let fa = FactorAnalytic::from_params(
-            4, 2,
+            4,
+            2,
             vec![1.0, 0.5, 0.3, 0.8, 0.2, 0.7, 0.4, 0.1],
             vec![1.0, 1.0, 1.0, 1.0],
         );
@@ -487,7 +555,7 @@ mod tests {
         let fa = fa2(3);
         let bounds = fa.bounds();
         assert_eq!(bounds.len(), 9); // 6 loadings + 3 psi
-        // First 6 are loadings: unconstrained
+                                     // First 6 are loadings: unconstrained
         assert!(bounds[0].0.is_infinite() && bounds[0].0 < 0.0);
         // Last 3 are psi: positive
         assert!(bounds[6].0 > 0.0);
@@ -509,7 +577,8 @@ mod tests {
     #[test]
     fn test_fa_symmetry() {
         let fa = FactorAnalytic::from_params(
-            4, 2,
+            4,
+            2,
             vec![1.0, 0.5, 0.3, 0.8, 0.2, 0.7, 0.4, 0.1],
             vec![1.0, 1.0, 1.0, 1.0],
         );
@@ -518,10 +587,14 @@ mod tests {
         for i in 0..4 {
             for j in 0..4 {
                 assert_relative_eq!(
-                    get_entry(&cov, i, j), get_entry(&cov, j, i), epsilon = 1e-10
+                    get_entry(&cov, i, j),
+                    get_entry(&cov, j, i),
+                    epsilon = 1e-10
                 );
                 assert_relative_eq!(
-                    get_entry(&inv, i, j), get_entry(&inv, j, i), epsilon = 1e-10
+                    get_entry(&inv, i, j),
+                    get_entry(&inv, j, i),
+                    epsilon = 1e-10
                 );
             }
         }

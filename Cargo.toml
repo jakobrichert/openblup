@@ -37,8 +37,17 @@ pyo3 = { version = "0.23", features = ["extension-module"] }
 numpy = "0.23"
 # CLI
 clap = { version = "4", features = ["derive"] }
+# WebAssembly
+wasm-bindgen = "0.2"
 # Random / testing
 rand = "0.8"
 approx = "0.5"
 # Indexing
 indexmap = "2"
+
+# Optimise dependencies even in debug builds: the sparse Cholesky (faer) and
+# dense linear algebra (nalgebra) are far too slow unoptimised for the tests
+# and examples, while the workspace crates themselves stay debuggable.
+[profile.dev.package."*"]
+opt-level = 2
+debug-assertions = false

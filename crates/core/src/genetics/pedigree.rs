@@ -85,17 +85,9 @@ impl Pedigree {
     ///
     /// # Errors
     /// Returns an error if the animal ID already exists.
-    pub fn add_animal(
-        &mut self,
-        id: &str,
-        sire: Option<&str>,
-        dam: Option<&str>,
-    ) -> Result<()> {
+    pub fn add_animal(&mut self, id: &str, sire: Option<&str>, dam: Option<&str>) -> Result<()> {
         if self.id_to_index.contains_key(id) {
-            return Err(LmmError::Pedigree(format!(
-                "Duplicate animal ID: '{}'",
-                id
-            )));
+            return Err(LmmError::Pedigree(format!("Duplicate animal ID: '{}'", id)));
         }
 
         let index = self.records.len();
@@ -127,10 +119,7 @@ impl Pedigree {
         // regardless of input order.
         for (id, _, _) in triples {
             if ped.id_to_index.contains_key(id) {
-                return Err(LmmError::Pedigree(format!(
-                    "Duplicate animal ID: '{}'",
-                    id
-                )));
+                return Err(LmmError::Pedigree(format!("Duplicate animal ID: '{}'", id)));
             }
             let index = ped.records.len();
             ped.records.push(PedigreeRecord {
@@ -170,30 +159,20 @@ impl Pedigree {
             .trim(csv::Trim::All)
             .from_path(path)?;
 
-        let headers: Vec<String> = reader
-            .headers()?
-            .iter()
-            .map(|h| h.to_lowercase())
-            .collect();
+        let headers: Vec<String> = reader.headers()?.iter().map(|h| h.to_lowercase()).collect();
 
         let animal_col = headers
             .iter()
             .position(|h| h == "animal")
-            .ok_or_else(|| {
-                LmmError::Pedigree("CSV missing 'animal' column".to_string())
-            })?;
+            .ok_or_else(|| LmmError::Pedigree("CSV missing 'animal' column".to_string()))?;
         let sire_col = headers
             .iter()
             .position(|h| h == "sire")
-            .ok_or_else(|| {
-                LmmError::Pedigree("CSV missing 'sire' column".to_string())
-            })?;
+            .ok_or_else(|| LmmError::Pedigree("CSV missing 'sire' column".to_string()))?;
         let dam_col = headers
             .iter()
             .position(|h| h == "dam")
-            .ok_or_else(|| {
-                LmmError::Pedigree("CSV missing 'dam' column".to_string())
-            })?;
+            .ok_or_else(|| LmmError::Pedigree("CSV missing 'dam' column".to_string()))?;
 
         let mut triples = Vec::new();
 
@@ -202,22 +181,16 @@ impl Pedigree {
 
             let animal = record
                 .get(animal_col)
-                .ok_or_else(|| {
-                    LmmError::Pedigree("Missing animal field in row".to_string())
-                })?
+                .ok_or_else(|| LmmError::Pedigree("Missing animal field in row".to_string()))?
                 .to_string();
 
             let sire_raw = record
                 .get(sire_col)
-                .ok_or_else(|| {
-                    LmmError::Pedigree("Missing sire field in row".to_string())
-                })?;
+                .ok_or_else(|| LmmError::Pedigree("Missing sire field in row".to_string()))?;
 
             let dam_raw = record
                 .get(dam_col)
-                .ok_or_else(|| {
-                    LmmError::Pedigree("Missing dam field in row".to_string())
-                })?;
+                .ok_or_else(|| LmmError::Pedigree("Missing dam field in row".to_string()))?;
 
             let sire = parse_parent(sire_raw);
             let dam = parse_parent(dam_raw);
@@ -292,9 +265,7 @@ impl Pedigree {
             }
         }
 
-        let mut queue: Vec<usize> = (0..n)
-            .filter(|&i| in_degree[i] == 0)
-            .collect();
+        let mut queue: Vec<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
         let mut visited = 0usize;
 
         while let Some(node) = queue.pop() {
@@ -308,9 +279,7 @@ impl Pedigree {
         }
 
         if visited != n {
-            return Err(LmmError::Pedigree(
-                "Pedigree contains a cycle".to_string(),
-            ));
+            return Err(LmmError::Pedigree("Pedigree contains a cycle".to_string()));
         }
 
         Ok(())
@@ -441,7 +410,11 @@ mod tests {
         let triples = vec![
             ("1".to_string(), None, None),
             ("2".to_string(), None, None),
-            ("3".to_string(), Some("1".to_string()), Some("2".to_string())),
+            (
+                "3".to_string(),
+                Some("1".to_string()),
+                Some("2".to_string()),
+            ),
         ];
         let ped = Pedigree::from_triples(&triples).unwrap();
         assert_eq!(ped.n_animals(), 3);
@@ -462,8 +435,16 @@ mod tests {
             ("1".to_string(), None, None),
             ("2".to_string(), None, None),
             ("3".to_string(), Some("1".to_string()), None),
-            ("4".to_string(), Some("1".to_string()), Some("2".to_string())),
-            ("5".to_string(), Some("3".to_string()), Some("2".to_string())),
+            (
+                "4".to_string(),
+                Some("1".to_string()),
+                Some("2".to_string()),
+            ),
+            (
+                "5".to_string(),
+                Some("3".to_string()),
+                Some("2".to_string()),
+            ),
         ];
         let ped = Pedigree::from_triples(&triples).unwrap();
         assert_eq!(ped.n_animals(), 5);
@@ -528,7 +509,11 @@ mod tests {
         let triples = vec![
             ("1".to_string(), None, None),
             ("2".to_string(), None, None),
-            ("3".to_string(), Some("1".to_string()), Some("2".to_string())),
+            (
+                "3".to_string(),
+                Some("1".to_string()),
+                Some("2".to_string()),
+            ),
         ];
         let mut ped = Pedigree::from_triples(&triples).unwrap();
         ped.sort_pedigree().unwrap();
@@ -544,7 +529,11 @@ mod tests {
     fn test_topological_sort_reorders() {
         // Give offspring before parents.
         let triples = vec![
-            ("3".to_string(), Some("1".to_string()), Some("2".to_string())),
+            (
+                "3".to_string(),
+                Some("1".to_string()),
+                Some("2".to_string()),
+            ),
             ("1".to_string(), None, None),
             ("2".to_string(), None, None),
         ];
@@ -594,7 +583,11 @@ mod tests {
         let triples = vec![
             ("1".to_string(), None, None),
             ("2".to_string(), None, None),
-            ("3".to_string(), Some("1".to_string()), Some("2".to_string())),
+            (
+                "3".to_string(),
+                Some("1".to_string()),
+                Some("2".to_string()),
+            ),
         ];
         let ped = Pedigree::from_triples(&triples).unwrap();
         assert!(ped.validate().is_ok());
@@ -620,10 +613,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_animal_id() {
-        let triples = vec![
-            ("1".to_string(), None, None),
-            ("1".to_string(), None, None),
-        ];
+        let triples = vec![("1".to_string(), None, None), ("1".to_string(), None, None)];
         let result = Pedigree::from_triples(&triples);
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
