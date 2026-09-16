@@ -111,6 +111,26 @@ impl ParamLayout {
     }
 }
 
+/// Check a parameter vector against the parameter bounds.
+pub(crate) fn check_theta(theta: &[f64], bounds: &[(f64, f64)]) -> Result<()> {
+    if theta.len() != bounds.len() {
+        return Err(LmmError::InvalidParameter(format!(
+            "expected {} variance parameters, got {}",
+            bounds.len(),
+            theta.len()
+        )));
+    }
+    for (i, (&t, &(lo, hi))) in theta.iter().zip(bounds).enumerate() {
+        if !t.is_finite() || t < lo || t > hi {
+            return Err(LmmError::InvalidParameter(format!(
+                "parameter {} = {} is outside [{}, {}]",
+                i, t, lo, hi
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Residual covariance evaluated at the current parameters.
 enum Residual {
     /// `R = sigma2 I`.
@@ -238,6 +258,26 @@ impl GeneralReml {
     /// Create a solver with the given iteration limit and relative tolerance.
     pub fn new(max_iter: usize, tol: f64) -> Self {
         Self { max_iter, tol }
+    }
+
+    /// The REML log-likelihood at `theta` without fitting.
+    ///
+    /// `theta` is the flat parameter vector in the order of
+    /// [`FitResult::variance_components`] (each random term's structure
+    /// parameters, then the residual's), on the structures' native scale.
+    /// The model's parameters are left unchanged.
+    pub fn log_likelihood_at(&self, model: &mut MixedModel, theta: &[f64]) -> Result<f64> {
+        let layout = ParamLayout::from_model(model);
+        check_theta(theta, &layout.bounds)?;
+        let saved: Vec<f64> = model
+            .random_var_structs
+            .iter()
+            .flat_map(|vs| vs.params())
+            .chain(model.residual_var_struct.params())
+            .collect();
+        let logl = self.evaluate(model, &layout, theta).map(|ev| ev.logl);
+        layout.apply(model, &saved)?;
+        logl
     }
 
     /// Fit the model.

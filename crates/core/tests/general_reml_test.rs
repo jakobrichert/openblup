@@ -838,3 +838,64 @@ fn structured_models_reject_em_and_bad_specs() {
         .build()
         .is_err());
 }
+
+/// `log_likelihood_at` reproduces the fitted log-likelihood on both engines,
+/// is lower away from the optimum, rejects parameters outside the bounds and
+/// leaves the model untouched.
+#[test]
+fn log_likelihood_at_matches_the_fit() {
+    let mut rng = rand::rngs::StdRng::seed_from_u64(21);
+    let mut y = Vec::new();
+    let mut geno = Vec::new();
+    let g_eff: Vec<f64> = (0..15).map(|_| 1.5 * normal(&mut rng)).collect();
+    for r in 0..3 {
+        for (g, eff) in g_eff.iter().enumerate() {
+            y.push(5.0 + r as f64 * 0.5 + eff + normal(&mut rng));
+            geno.push(format!("G{}", g));
+        }
+    }
+    let mut df = DataFrame::new();
+    df.add_float_column("y", y).unwrap();
+    let refs: Vec<&str> = geno.iter().map(|s| s.as_str()).collect();
+    df.add_factor_column("geno", &refs).unwrap();
+
+    // Sparse path (scaled identity) and general path (AR1 residual in data order).
+    for residual in [None, Some(AR1::new(1.0, 0.2))] {
+        let mut builder = MixedModelBuilder::new()
+            .data(&df)
+            .response("y")
+            .fixed("mu")
+            .random("geno", Identity::new(1.0), None);
+        if let Some(r) = residual.clone() {
+            builder = builder.residual(r);
+        }
+        let mut model = builder.build().unwrap();
+        let fit = AiReml::new(100, 1e-10).fit(&mut model).unwrap();
+        let theta = result_theta(&fit);
+        let engine = AiReml::new(100, 1e-10);
+        let before: Vec<f64> = model.random_var_structs[0].params();
+
+        let at_hat = engine.log_likelihood_at(&mut model, &theta).unwrap();
+        assert!(
+            (at_hat - fit.log_likelihood).abs() < 1e-8 * at_hat.abs(),
+            "{} vs {}",
+            at_hat,
+            fit.log_likelihood
+        );
+        let mut off = theta.clone();
+        off[0] *= 2.0;
+        assert!(engine.log_likelihood_at(&mut model, &off).unwrap() < at_hat);
+        let mut bad = theta.clone();
+        bad[0] = -1.0;
+        assert!(engine.log_likelihood_at(&mut model, &bad).is_err());
+        assert!(engine.log_likelihood_at(&mut model, &theta[1..]).is_err());
+        assert_eq!(model.random_var_structs[0].params(), before);
+
+        // The iterates of the fit evaluate to their recorded log-likelihoods.
+        let last = fit.history.last().unwrap();
+        let at_last = engine
+            .log_likelihood_at(&mut model, &last.variance_params)
+            .unwrap();
+        assert!((at_last - last.log_likelihood).abs() < 1e-6 * at_last.abs());
+    }
+}
