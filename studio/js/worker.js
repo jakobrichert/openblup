@@ -1,5 +1,5 @@
 // Runs the OpenBLUP WebAssembly engine off the main thread.
-import init, { version, inspect, fit } from "../pkg/openblup_studio.js";
+import init, { version, inspect, fit, likelihood_surface } from "../pkg/openblup_studio.js";
 
 const ready = init();
 
@@ -12,6 +12,7 @@ self.onmessage = async ({ data }) => {
     if (op === "version") result = version();
     else if (op === "inspect") result = JSON.parse(inspect(payload));
     else if (op === "fit") result = JSON.parse(fit(JSON.stringify(payload)));
+    else if (op === "surface") result = JSON.parse(likelihood_surface(JSON.stringify(payload.request), JSON.stringify(payload.surface)));
     else throw new Error(`Unknown operation '${op}'`);
     self.postMessage({ id, ok: true, result, ms: performance.now() - t0 });
   } catch (err) {
