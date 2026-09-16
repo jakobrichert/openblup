@@ -252,18 +252,18 @@ refactor: extract common Kronecker assembly into shared function
 | Area | What's Needed | Skills |
 |------|---------------|--------|
 | **Validation** | Run same models in OpenBLUP + ASReml/sommer, compare results | R + breeding knowledge |
-| **Sparse MME solve** | Wire `matrix::sparse_cholesky` / `sparse_inverse` (Takahashi) into the REML engines for >10k equations | Rust + sparse LA |
-| **Structured residuals in REML** | Fit non-identity R (spatial AR1xAR1 residual) — assembly exists, parameter updates do not | Rust + REML theory |
-| **Multi-trait AI-REML** | Replace the EM-only multi-trait engine | Rust + REML theory |
+| **Sparse general engine** | Structured residuals (AR1xAR1) and FA / unstructured terms are still assembled and inverted densely; extend the sparse Cholesky + Takahashi path to them for large MET and spatial analyses | Rust + sparse LA |
+| **Sparse multi-trait** | `US(trait) ⊗ I` residuals are assembled densely, and the wide-format `MultiTraitReml` engine is EM-only; a sparse `R⁻¹` for long-format multi-trait models would lift the few-thousand-record limit | Rust + REML theory |
 
 ### Medium Priority
 
 | Area | What's Needed | Skills |
 |------|---------------|--------|
-| **Kenward-Roger df** | Bias-adjusted covariance and scaled F on top of the Satterthwaite ddf | Rust + statistics |
+| **Kenward-Roger for structured terms** | Kenward-Roger currently needs scaled-identity / relationship-matrix terms and an IID residual; extend the derivative matrices to AR1, FA and US structures | Rust + statistics |
+| **Cross-validation with several random terms** | `cross_validate()` / `--cv` handle a single random term | Rust |
 | **GPU backend** | `wgpu` compute shaders behind the existing `gpu` feature interface | Rust + GPU |
 | **Tutorials** | Worked examples: dairy, wheat, maize, forestry | Breeding + writing |
-| **Python API polish** | Multi-trait and spatial models from Python, richer result objects | Python + PyO3 |
+| **Python API polish** | Richer result objects (pandas-first summaries, plotting helpers) | Python + PyO3 |
 
 ### Good First Issues
 

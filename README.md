@@ -305,7 +305,7 @@ openblup/
 ├── python/
 │   ├── openblup/             # Python package (wrappers, type stubs)
 │   └── tests/                # Python test suite
-├── examples/                 # Example data (field trial, Mrode pedigree)
+├── examples/                 # Example data (field trial, MET trial, Mrode and simulated pedigrees)
 └── .github/workflows/        # CI: fmt, clippy, tests, wasm, Python on 3 platforms
 ```
 
@@ -355,7 +355,7 @@ The algorithms implemented here are based on well-established quantitative genet
 | Genomic BLUP | Yes | Yes | No | **Yes** |
 | Single-step (H) | Yes | Yes | No | **Yes** |
 | Spatial (AR1xAR1) | Yes | Yes | No | **Yes** |
-| Multi-trait | Yes | Yes | Yes | **Yes (EM-REML)** |
+| Multi-trait | Yes | Yes | Yes | **Yes** (AI-REML via `US ⊗ A`; EM-REML wide-format engine) |
 | Factor analytic | Yes | Limited | No | **Yes** |
 | Sparse solver | Yes | No | Yes | **Yes** (sparse Cholesky + Takahashi inverse subset; dense for structured residuals) |
 | Python API | No | No | No | **Yes (PyO3)** |
@@ -379,7 +379,7 @@ Contributions are welcome! See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the fu
 | Area | What's Needed |
 |------|---------------|
 | **Validation** | Run the same model in OpenBLUP + ASReml/sommer, compare variance components and BLUPs |
-| **Sparse MME solve** | Wire the existing sparse Cholesky / Takahashi code into the REML engines for large evaluations |
+| **Sparse general engine** | Extend the sparse Cholesky / Takahashi path (used today for IID-residual models) to structured residuals and FA / unstructured terms |
 | **Tutorials** | Worked examples from real breeding programs (dairy, wheat, maize, forestry) |
 | **GPU backends** | wgpu compute shader implementations behind the existing `gpu` feature interface |
 
