@@ -16,7 +16,7 @@ authors = ["Jakob"]
 
 [workspace.dependencies]
 # Core math
-nalgebra = "0.33"
+nalgebra = "0.35"
 # Sparse Cholesky (faer)
 faer = "0.20"
 # Sparse matrices
