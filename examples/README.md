@@ -3,6 +3,7 @@
 | File | Description |
 |------|-------------|
 | `field_trial.csv` | Small plant breeding trial: 6 genotypes x 3 reps with a block factor, the field position (`row` 1-3, `col` 1-6, one plot per cell) and one missing plot (`NA`). `rep`, `block`, `row` and `col` are numeric codes, so pass `--factor rep` (CLI) or call `as_factor("rep")` (Python) to treat them as categorical (factors named in `--random`/`--residual` terms are converted automatically). |
+| `spatial_trial.csv` | Simulated spatial field trial: 60 genotypes x 4 reps on a 12 x 20 row x column grid (each rep is a 12 x 5 block of columns, genotypes randomised within reps), two missing plots. Yield = 6 + rep effect (0, 0.35, -0.2, 0.15) + genotype effect (sigma²_g = 0.25) + a separable AR1 x AR1 field trend (sigma² = 0.3, rho_row = 0.6, rho_col = 0.45; numpy `default_rng(2026)`). A `row:ar1*col:ar1c` residual recovers sigma²_g ≈ 0.25, rho_row ≈ 0.63 and rho_col ≈ 0.53. |
 | `met_trial.csv` | Simulated multi-environment trial: 30 genotypes x 4 environments x 2 reps (240 plots, environment means 50, 60, 45, 55). Genotype effects follow a one-factor model across environments (loadings 1.5, 2.5, 1.0, 2.0; specific variances 0.5, 0.8, 1.2, 0.4; residual variance 1.5; numpy `default_rng(7)`). An `env:fa1*genotype` term recovers the loading pattern; with only 30 genotypes several specific variances are estimated at the boundary. |
 | `mrode_pedigree.csv` | Pedigree of Mrode (2005) *Linear Models for the Prediction of Animal Breeding Values*, Example 3.1 (8 animals, `0` = unknown parent). |
 | `mrode_records.csv` | Pre-weaning gain records for the five animals with phenotypes in the same example. With only five records the REML estimate of the residual variance is on the boundary (zero), so this set is meant for the fixed-variance validation and `ainverse`, not as a REML demo. |
@@ -20,6 +21,10 @@ openblup fit --data examples/animal_records.csv --response weight \
 
 # Spatial analysis of the plant trial: AR1 x AR1 residual over the row x column grid
 openblup fit --data examples/field_trial.csv --response yield \
+    --fixed "mu + rep" --factor rep --random genotype --residual "row:ar1*col:ar1c"
+
+# A larger spatial trial (12 x 20 grid) with an AR1 x AR1 residual
+openblup fit --data examples/spatial_trial.csv --response yield \
     --fixed "mu + rep" --factor rep --random genotype --residual "row:ar1*col:ar1c"
 
 # Multi-environment trial: FA1 genotype-by-environment interaction

@@ -5,6 +5,7 @@ members = [
     "crates/python-bindings",
     "crates/cli",
     "crates/wasm",
+    "crates/studio",
 ]
 
 [workspace.package]

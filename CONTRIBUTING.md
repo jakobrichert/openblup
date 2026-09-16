@@ -94,6 +94,13 @@ cargo test -p plant-breeding-lmm-core test_mrode_example
 pip install maturin numpy scipy pytest
 maturin develop
 python -m pytest python/tests
+
+# Build, test and serve OpenBLUP Studio (optional; see studio/README.md)
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version <wasm-bindgen version in Cargo.lock> --locked
+studio/build.sh
+node studio/tests/smoke.mjs
+python3 -m http.server --directory studio 8000
 ```
 
 ### Project Structure
@@ -114,12 +121,14 @@ openblup/
 │   │   └── tests/            # Integration tests (Mrode validation, multi-trait)
 │   ├── python-bindings/      # PyO3 bridge (openblup._internal)
 │   ├── cli/                  # Command-line tool + end-to-end tests
-│   └── wasm/                 # WebAssembly crate + browser demo
+│   ├── wasm/                 # Small dependency-free WebAssembly crate + demo
+│   └── studio/               # Full engine for the browser (OpenBLUP Studio)
+├── studio/                   # OpenBLUP Studio web app (plain ES modules)
 ├── python/
 │   ├── openblup/             # Python package + type stubs
 │   └── tests/                # Python tests
-├── examples/                 # Example data sets used in docs and CI
-└── .github/workflows/        # CI (fmt, clippy -D warnings, tests, wasm, Python)
+├── examples/                 # Example data sets used in docs, CI and the Studio
+└── .github/workflows/        # CI (fmt, clippy -D warnings, tests, wasm, Python, Studio)
 ```
 
 ## Development Workflow
@@ -260,6 +269,7 @@ refactor: extract common Kronecker assembly into shared function
 | Area | What's Needed | Skills |
 |------|---------------|--------|
 | **Kenward-Roger for structured terms** | Kenward-Roger currently needs scaled-identity / relationship-matrix terms and an IID residual; extend the derivative matrices to AR1, FA and US structures | Rust + statistics |
+| **Standard errors at the boundary** | When a variance parameter is fixed at zero, the general engine reports no standard errors at all; invert the average information of the free parameters instead | Rust + REML theory |
 | **Cross-validation with several random terms** | `cross_validate()` / `--cv` handle a single random term | Rust |
 | **GPU backend** | `wgpu` compute shaders behind the existing `gpu` feature interface | Rust + GPU |
 | **Tutorials** | Worked examples: dairy, wheat, maize, forestry | Breeding + writing |

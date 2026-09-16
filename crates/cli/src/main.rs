@@ -14,8 +14,7 @@ use core::genetics::{
     compute_a_inverse, compute_a_inverse_with_inbreeding, compute_inbreeding, Pedigree,
 };
 use core::lmm::{reliability_from_se, AiReml, EmReml, FitResult};
-use core::model::{MixedModel, MixedModelBuilder};
-use core::variance::StructureSpec;
+use core::model::{FitSpec, MixedModel};
 
 #[derive(Parser)]
 #[command(name = "openblup")]
@@ -254,78 +253,6 @@ struct FitOptions {
     cv_seed: u64,
 }
 
-/// One factor of a term specification: `name[:structure]`.
-#[derive(Debug, Clone)]
-struct FactorSpec {
-    name: String,
-    structure: StructureSpec,
-    explicit_structure: bool,
-}
-
-/// A random or residual term: one factor or an interaction of two.
-#[derive(Debug, Clone)]
-struct TermSpec {
-    outer: FactorSpec,
-    inner: Option<FactorSpec>,
-}
-
-impl TermSpec {
-    /// The factors' column names.
-    fn columns(&self) -> Vec<&str> {
-        let mut v = vec![self.outer.name.as_str()];
-        if let Some(inner) = &self.inner {
-            v.push(inner.name.as_str());
-        }
-        v
-    }
-
-    fn label(&self) -> String {
-        match &self.inner {
-            Some(inner) => format!("{}:{}", self.outer.name, inner.name),
-            None => self.outer.name.clone(),
-        }
-    }
-}
-
-fn parse_factor_spec(s: &str) -> Result<FactorSpec> {
-    let s = s.trim();
-    if s.is_empty() {
-        bail!("Empty factor in term specification");
-    }
-    match s.split_once(':') {
-        Some((name, structure)) => Ok(FactorSpec {
-            name: name.trim().to_string(),
-            structure: StructureSpec::parse(structure)
-                .with_context(|| format!("Invalid structure in '{}'", s))?,
-            explicit_structure: true,
-        }),
-        None => Ok(FactorSpec {
-            name: s.to_string(),
-            structure: StructureSpec::Identity { sigma2: 1.0 },
-            explicit_structure: false,
-        }),
-    }
-}
-
-/// Parse `factor[:struct]` or `factor[:struct]*factor[:struct]`.
-fn parse_term_spec(s: &str) -> Result<TermSpec> {
-    let parts: Vec<&str> = s.split('*').collect();
-    match parts.as_slice() {
-        [single] => Ok(TermSpec {
-            outer: parse_factor_spec(single)?,
-            inner: None,
-        }),
-        [outer, inner] => Ok(TermSpec {
-            outer: parse_factor_spec(outer)?,
-            inner: Some(parse_factor_spec(inner)?),
-        }),
-        _ => bail!(
-            "Term '{}' has more than two factors; only `a*b` interactions are supported",
-            s
-        ),
-    }
-}
-
 /// Load, validate and sort a pedigree file.
 fn load_pedigree(path: &str) -> Result<Pedigree> {
     let mut ped = Pedigree::from_csv(path)
@@ -345,9 +272,12 @@ fn cmd_fit(opts: FitOptions) -> Result<()> {
     if opts.cv.is_some_and(|k| k < 2) {
         bail!("--cv needs at least 2 folds");
     }
+    if opts.pedigree.is_some() && opts.random.is_empty() {
+        bail!("--pedigree requires at least one --random term");
+    }
 
     // ---- data ----
-    let mut df = DataFrame::from_csv(&opts.data)
+    let df = DataFrame::from_csv(&opts.data)
         .with_context(|| format!("Failed to load data from '{}'", opts.data))?;
     eprintln!(
         "Loaded {} observations, {} columns from '{}'",
@@ -355,184 +285,29 @@ fn cmd_fit(opts: FitOptions) -> Result<()> {
         df.ncols(),
         opts.data
     );
-
-    if df.get_float(&opts.response).is_err() {
-        bail!(
-            "Response column '{}' is missing or not numeric (columns: {})",
-            opts.response,
-            df.column_names().join(", ")
-        );
-    }
-    if df.has_missing(&opts.response)? {
-        let before = df.nrows();
-        df = df.drop_missing(&opts.response)?;
-        eprintln!(
-            "Dropped {} rows with missing '{}' ({} remain)",
-            before - df.nrows(),
-            opts.response,
-            df.nrows()
-        );
-    }
-    if df.nrows() == 0 {
-        bail!("No observations with a non-missing response");
-    }
-
-    for col in &opts.factor {
-        df.as_factor(col)
-            .with_context(|| format!("Cannot treat column '{}' as a factor", col))?;
-    }
-
-    // ---- terms ----
-    let random_terms: Vec<TermSpec> = opts
-        .random
-        .iter()
-        .map(|s| parse_term_spec(s).with_context(|| format!("Invalid --random '{}'", s)))
-        .collect::<Result<_>>()?;
-    let residual_term = match &opts.residual {
-        Some(s) => Some(parse_term_spec(s).with_context(|| format!("Invalid --residual '{}'", s))?),
-        None => None,
-    };
-    for term in random_terms.iter().chain(residual_term.iter()) {
-        for col in term.columns() {
-            if df.get_column(col).is_err() {
-                bail!(
-                    "Column '{}' (term '{}') not found in the data (columns: {})",
-                    col,
-                    term.label(),
-                    df.column_names().join(", ")
-                );
-            }
-            if df.get_factor(col).is_err() {
-                df.as_factor(col)
-                    .with_context(|| format!("Term '{}' must use categorical columns", col))?;
-                eprintln!("Treating numeric column '{}' as a factor", col);
-            }
-        }
-    }
-
-    // ---- pedigree ----
     let pedigree = match &opts.pedigree {
         Some(path) => Some(load_pedigree(path)?),
         None => None,
     };
-    let pedigree_factor: Option<String> = match (&pedigree, &opts.pedigree_term) {
-        (None, _) => None,
-        (Some(_), Some(term)) => {
-            let known = random_terms
-                .iter()
-                .any(|t| t.columns().contains(&term.as_str()));
-            if !known {
-                bail!(
-                    "--pedigree-term '{}' is not a factor of any --random term",
-                    term
-                );
-            }
-            Some(term.clone())
-        }
-        (Some(_), None) => match random_terms.first() {
-            Some(t) => Some(
-                t.inner
-                    .as_ref()
-                    .map(|f| f.name.clone())
-                    .unwrap_or_else(|| t.outer.name.clone()),
-            ),
-            None => bail!("--pedigree requires at least one --random term"),
-        },
-    };
 
     // ---- model ----
-    let mut builder = MixedModelBuilder::new()
-        .data(&df)
-        .response(&opts.response)
-        .fixed(&opts.fixed)
-        .max_iterations(opts.max_iter)
-        .convergence(opts.tolerance);
-
-    for term in &random_terms {
-        match &term.inner {
-            None => {
-                let uses_ped = pedigree_factor.as_deref() == Some(term.outer.name.as_str());
-                if uses_ped && term.outer.explicit_structure && !term.outer.structure.is_identity()
-                {
-                    bail!(
-                        "Term '{}': a pedigree can only be combined with the default (idv) \
-                         structure; use an interaction such as env:fa1*{} for structured \
-                         genetic effects",
-                        term.label(),
-                        term.outer.name
-                    );
-                }
-                if uses_ped {
-                    let ped = pedigree.as_ref().unwrap();
-                    eprintln!(
-                        "Using pedigree A-inverse ({0}x{0}, with inbreeding) for random term '{1}'",
-                        ped.n_animals(),
-                        term.outer.name
-                    );
-                    builder = builder.random_spec(
-                        &term.outer.name,
-                        term.outer.structure.clone(),
-                        Some(ped),
-                    );
-                } else {
-                    builder =
-                        builder.random_spec(&term.outer.name, term.outer.structure.clone(), None);
-                }
-            }
-            Some(inner) => {
-                if pedigree_factor.as_deref() == Some(term.outer.name.as_str()) {
-                    bail!(
-                        "Term '{}': the pedigree factor must be the second (inner) factor of \
-                         an interaction, e.g. {}:{}*{}",
-                        term.label(),
-                        inner.name,
-                        "fa1",
-                        term.outer.name
-                    );
-                }
-                let uses_ped = pedigree_factor.as_deref() == Some(inner.name.as_str());
-                let ped = if uses_ped { pedigree.as_ref() } else { None };
-                if let Some(p) = ped {
-                    eprintln!(
-                        "Using pedigree A-inverse ({0}x{0}, with inbreeding) for factor '{1}' of term '{2}'",
-                        p.n_animals(),
-                        inner.name,
-                        term.label()
-                    );
-                }
-                let inner_spec = if inner.explicit_structure {
-                    Some(inner.structure.clone())
-                } else {
-                    None
-                };
-                builder = builder.random_interaction_spec(
-                    &term.outer.name,
-                    term.outer.structure.clone(),
-                    &inner.name,
-                    inner_spec,
-                    ped,
-                );
-            }
-        }
+    let spec = FitSpec {
+        response: opts.response.clone(),
+        fixed: opts.fixed.clone(),
+        random: opts.random.clone(),
+        residual: opts.residual.clone(),
+        factors: opts.factor.clone(),
+        pedigree_term: opts.pedigree_term.clone(),
+        max_iter: opts.max_iter,
+        tolerance: opts.tolerance,
+    };
+    let prepared = spec
+        .prepare(&df, pedigree.as_ref())
+        .context("Failed to build mixed model")?;
+    for note in &prepared.notes {
+        eprintln!("{}", note);
     }
-
-    if let Some(res) = &residual_term {
-        match &res.inner {
-            None => {
-                builder = builder.residual_spec(res.outer.structure.clone());
-            }
-            Some(inner) => {
-                builder = builder.residual_interaction_spec(
-                    &res.outer.name,
-                    res.outer.structure.clone(),
-                    &inner.name,
-                    inner.structure.clone(),
-                );
-            }
-        }
-    }
-
-    let mut model = builder.build().context("Failed to build mixed model")?;
+    let mut model = prepared.model;
 
     eprintln!(
         "Model: {} fixed params, {} random terms, {} variance parameters, algorithm={:?}{}",

@@ -1,6 +1,10 @@
 # OpenBLUP
 
-**Open-source REML and BLUP for plant and animal breeding** — a modern linear mixed model engine written in Rust with Python bindings, a command-line tool and a WebAssembly build.
+**Open-source REML and BLUP for plant and animal breeding** — a modern linear mixed model engine written in Rust with Python bindings, a command-line tool and a browser app.
+
+**[Open OpenBLUP Studio →](https://jakobrichert.github.io/openblup/)** — the full engine compiled to WebAssembly: build a model, fit it and explore the results in your browser, with nothing to install and no data leaving your machine.
+
+![OpenBLUP Studio fitting an AR1 x AR1 spatial model to a field trial](docs/images/studio-field.png)
 
 ## Why This Project?
 
@@ -73,6 +77,12 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 - `openblup fit` — fit models from CSV; term specs such as `--random "env:fa1*genotype"` and `--residual "row:ar1*col:ar1c"`, `--ddf satterthwaite|kenward-roger`, `--cv K`, `--diagnostics`, text or JSON output, BLUP export to CSV
 - `openblup ainverse` — compute, inspect and export the A-inverse and inbreeding coefficients
 
+### OpenBLUP Studio (browser app)
+- The complete engine compiled to WebAssembly (`crates/studio`), running in a Web Worker
+- Point-and-click model builder with the CLI's term vocabulary, built-in example analyses, CSV and pedigree upload
+- Variance components, BLUEs and Wald tests, ranked BLUPs / EBVs, residual diagnostics, spatial field maps, FA genetic correlations and reaction norms, convergence and cross-validation views
+- Shows every model as the equivalent CLI command and Python code; see [OpenBLUP Studio](#openblup-studio) below
+
 ### WebAssembly Target
 - Self-contained `openblup-wasm` crate (no rayon, no faer, no file I/O) with `wasm-bindgen` exports
 - JSON API for A-inverse (with inbreeding), single-random-term EM-REML and the G-matrix
@@ -84,6 +94,31 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 - The dedicated multi-trait engine (`MultiTraitReml`) uses EM-REML. For AI-REML with standard errors and the full diagnostics, fit multi-trait models through the general structures instead: stack the records in long format (one row per trait x unit) and use `trait:animal` with `US(trait) ⊗ A` plus a `US(trait) ⊗ I` residual over the (trait, unit) grid (see the CLI and Python quick starts). The residual of that route is assembled densely, so keep it to a few thousand records.
 - Satterthwaite denominator df need the average-information matrix, so they are available after an AI-REML fit with no variance parameter on the boundary (any variance structure). Kenward-Roger additionally needs scaled-identity / relationship-matrix terms and an IID residual. Unavailable methods fall back to the next simpler one (the output says which). Leverage-based residual diagnostics need an IID residual.
 - `--cv` / `cross_validate()` handle models with a single random term (genomic or pedigree prediction).
+
+## OpenBLUP Studio
+
+[OpenBLUP Studio](https://jakobrichert.github.io/openblup/) is a web app for fitting and exploring mixed models without writing code. It runs the same engine as the CLI and the Python package, compiled to WebAssembly, entirely in the browser.
+
+| Multi-environment trial: FA1 genetic correlations and reaction norms | Animal model: estimated breeding values with 95 % intervals |
+|---|---|
+| ![G×E view](docs/images/studio-gxe.png) | ![Breeding values view](docs/images/studio-breeding-values.png) |
+
+![Model builder with the equivalent CLI command](docs/images/studio-model.png)
+
+- Start from one of the built-in analyses (spatial field trial, multi-environment trial, pedigree animal model, RCBD) or drop in your own CSV and pedigree
+- Pick the response, fixed effects, random terms with a variance structure per factor (`idv`, `diag`, `us`, `fa1`–`fa3`, `ar1`, `ar1c`), interactions, a pedigree term and an IID, AR1 x AR1 or custom residual
+- Every chart has a table view, and results export to JSON (BLUPs to CSV)
+
+Run it locally:
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.128 --locked   # must match Cargo.lock
+studio/build.sh
+python3 -m http.server --directory studio 8000             # open http://localhost:8000
+```
+
+See [studio/README.md](studio/README.md) for details.
 
 ## Quick Start (Rust)
 
@@ -301,12 +336,15 @@ openblup/
 │   │   └── gpu/              # Feature-gated GPU backend interface (CPU fallback)
 │   ├── python-bindings/      # PyO3 extension module (openblup._internal)
 │   ├── cli/                  # Command-line tool (clap) + end-to-end tests
-│   └── wasm/                 # WebAssembly target (wasm-bindgen) + browser demo
+│   ├── wasm/                 # Small WebAssembly target (wasm-bindgen) + demo page
+│   └── studio/               # Full engine for the browser (OpenBLUP Studio)
+├── studio/                   # OpenBLUP Studio web app (ES modules, no bundler)
 ├── python/
 │   ├── openblup/             # Python package (wrappers, type stubs)
 │   └── tests/                # Python test suite
-├── examples/                 # Example data (field trial, MET trial, Mrode and simulated pedigrees)
-└── .github/workflows/        # CI: fmt, clippy, tests, wasm, Python on 3 platforms
+├── examples/                 # Example data (field trials, MET trial, Mrode and simulated pedigrees)
+├── docs/images/              # Screenshots
+└── .github/workflows/        # CI: fmt, clippy, tests, wasm, Python on 3 platforms; Studio build + Pages deploy
 ```
 
 ## Algorithms & References
@@ -361,7 +399,7 @@ The algorithms implemented here are based on well-established quantitative genet
 | Python API | No | No | No | **Yes (PyO3)** |
 | CLI tool | Yes | No | No | **Yes** |
 | Wald tests | Yes | Yes | Yes | **Yes** |
-| WebAssembly target | No | No | No | **Yes** |
+| Runs in the browser (WebAssembly) | No | No | No | **Yes** ([Studio](https://jakobrichert.github.io/openblup/)) |
 | Memory safe | No | N/A | Yes (GC) | **Yes (ownership)** |
 | Performance | Excellent | Slow | Good | **Good for small/medium problems (see limitations)** |
 

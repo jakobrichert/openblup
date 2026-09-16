@@ -64,12 +64,27 @@ impl DataFrame {
     /// println!("rows = {}, cols = {}", df.nrows(), df.ncols());
     /// ```
     pub fn from_csv<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path = path.as_ref();
+        let file = std::fs::File::open(path.as_ref())?;
+        Self::from_csv_reader(file)
+    }
+
+    /// Read CSV data from any reader (an in-memory string, an upload in the
+    /// browser, ...). Column detection is the same as [`DataFrame::from_csv`].
+    ///
+    /// ```
+    /// use plant_breeding_lmm_core::data::DataFrame;
+    ///
+    /// let csv = "genotype,yield\nG1,4.2\nG2,NA\n";
+    /// let df = DataFrame::from_csv_reader(csv.as_bytes()).unwrap();
+    /// assert_eq!(df.nrows(), 2);
+    /// assert!(df.get_float("yield").unwrap()[1].is_nan());
+    /// ```
+    pub fn from_csv_reader<R: std::io::Read>(rdr: R) -> Result<Self> {
         let mut reader = csv::ReaderBuilder::new()
             .has_headers(true)
             .flexible(false)
             .trim(csv::Trim::All)
-            .from_path(path)?;
+            .from_reader(rdr);
 
         // Collect headers.
         let headers: Vec<String> = reader.headers()?.iter().map(|h| h.to_string()).collect();

@@ -27,3 +27,7 @@ Thumbs.db
 
 # Claude
 .claude/
+
+# OpenBLUP Studio build output (studio/build.sh)
+studio/pkg/
+studio/examples/

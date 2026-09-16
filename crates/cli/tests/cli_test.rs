@@ -428,6 +428,38 @@ fn fit_satterthwaite_cv_and_diagnostics() {
 }
 
 #[test]
+fn fit_data_order_ar1_residual() {
+    // `--residual ar1` (no `*`) is an AR1 structure over the records in data order.
+    let out = openblup()
+        .args([
+            "fit",
+            "--data",
+            example("field_trial.csv").to_str().unwrap(),
+            "--response",
+            "yield",
+            "--random",
+            "genotype",
+            "--residual",
+            "ar1",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stderr: {}", stderr);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let residual = json["variance_components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "residual")
+        .unwrap();
+    assert_eq!(residual["structure"], "AR1");
+    assert_eq!(residual["parameters"].as_array().unwrap().len(), 2);
+}
+
+#[test]
 fn fit_skips_cv_for_unsupported_model() {
     // Cross-validation needs an IID residual: with a spatial residual the fit
     // is still reported and the cross-validation is skipped with a warning.

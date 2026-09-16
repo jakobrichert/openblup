@@ -1,0 +1,11 @@
+{
+  "name": "openblup-studio",
+  "private": true,
+  "description": "Browser UI for the OpenBLUP mixed model engine",
+  "type": "module",
+  "scripts": {
+    "build": "./build.sh",
+    "test": "node tests/smoke.mjs",
+    "serve": "python3 -m http.server 8000"
+  }
+}

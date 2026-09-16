@@ -152,12 +152,17 @@ impl Pedigree {
     /// Returns an error if the file cannot be read, columns are missing, or
     /// duplicate animal IDs are found.
     pub fn from_csv<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path = path.as_ref();
+        let file = std::fs::File::open(path.as_ref())?;
+        Self::from_csv_reader(file)
+    }
+
+    /// Read a pedigree in the [`Pedigree::from_csv`] format from any reader.
+    pub fn from_csv_reader<R: std::io::Read>(rdr: R) -> Result<Self> {
         let mut reader = csv::ReaderBuilder::new()
             .has_headers(true)
             .flexible(false)
             .trim(csv::Trim::All)
-            .from_path(path)?;
+            .from_reader(rdr);
 
         let headers: Vec<String> = reader.headers()?.iter().map(|h| h.to_lowercase()).collect();
 

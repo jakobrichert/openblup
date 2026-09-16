@@ -1,0 +1,20 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # Major bumps (e.g. PyO3, faer, nalgebra) arrive as separate PRs since
+      # they usually need code changes.
+      cargo-minor-and-patch:
+        update-types: [minor, patch]
