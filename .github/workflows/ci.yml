@@ -23,6 +23,11 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # The workspace builds the PyO3 bindings, and PyO3 0.23 supports
+      # Python <= 3.13; don't depend on the runner's default interpreter.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
