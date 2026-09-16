@@ -158,7 +158,7 @@ enum Commands {
         diagnostics: Option<String>,
 
         /// Run k-fold cross-validation of prediction accuracy (single random
-        /// term models)
+        /// term models with an IID residual; skipped with a warning otherwise)
         #[arg(long, value_name = "K")]
         cv: Option<usize>,
 
@@ -342,6 +342,10 @@ fn load_pedigree(path: &str) -> Result<Pedigree> {
 }
 
 fn cmd_fit(opts: FitOptions) -> Result<()> {
+    if opts.cv.is_some_and(|k| k < 2) {
+        bail!("--cv needs at least 2 folds");
+    }
+
     // ---- data ----
     let mut df = DataFrame::from_csv(&opts.data)
         .with_context(|| format!("Failed to load data from '{}'", opts.data))?;
@@ -580,12 +584,16 @@ fn cmd_fit(opts: FitOptions) -> Result<()> {
     }
 
     // ---- cross-validation ----
-    let cv_result = match opts.cv {
-        Some(k) => Some(
-            model
-                .cross_validate(k, opts.cv_seed)
-                .context("Cross-validation failed")?,
-        ),
+    // An unsupported model (several random terms, structured residual) only
+    // skips the cross-validation, like an unavailable ddf method, so the fit
+    // itself is still reported.
+    let cv_result = match opts.cv.map(|k| model.cross_validate(k, opts.cv_seed)) {
+        Some(Ok(cv)) => Some(cv),
+        Some(Err(core::LmmError::ModelSpec(msg))) => {
+            eprintln!("Warning: skipping cross-validation: {}.", msg);
+            None
+        }
+        Some(Err(e)) => return Err(e).context("Cross-validation failed"),
         None => None,
     };
 

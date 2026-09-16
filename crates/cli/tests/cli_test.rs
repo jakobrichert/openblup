@@ -428,6 +428,57 @@ fn fit_satterthwaite_cv_and_diagnostics() {
 }
 
 #[test]
+fn fit_skips_cv_for_unsupported_model() {
+    // Cross-validation needs an IID residual: with a spatial residual the fit
+    // is still reported and the cross-validation is skipped with a warning.
+    let out = openblup()
+        .args([
+            "fit",
+            "--data",
+            example("field_trial.csv").to_str().unwrap(),
+            "--response",
+            "yield",
+            "--fixed",
+            "mu + rep",
+            "--factor",
+            "rep",
+            "--random",
+            "genotype",
+            "--residual",
+            "row:ar1*col:ar1c",
+            "--cv",
+            "3",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stderr: {}", stderr);
+    assert!(stderr.contains("skipping cross-validation"), "{}", stderr);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(json["variance_components"].is_array() || json["variance_components"].is_object());
+    assert!(json.get("cross_validation").is_none());
+
+    // A fold count below 2 is still an argument error.
+    let out = openblup()
+        .args([
+            "fit",
+            "--data",
+            example("field_trial.csv").to_str().unwrap(),
+            "--response",
+            "yield",
+            "--random",
+            "genotype",
+            "--cv",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+}
+
+#[test]
 fn fit_kenward_roger_ddf() {
     let out = openblup()
         .args([
