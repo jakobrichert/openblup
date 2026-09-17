@@ -170,134 +170,88 @@ pub fn compute_a_inverse_with_inbreeding(ped: &Pedigree) -> Result<SparseMat> {
 ///
 /// The pedigree must be topologically sorted (parents before offspring).
 ///
-/// For animal *i* with sire *s* and dam *d*, `F[i] = 0.5 * A[s, d]` when both
-/// parents are known and `0` otherwise, where `A` is the numerator
-/// relationship matrix. Rather than forming `A`, the algorithm traces the
-/// ancestor paths of each animal with the Cholesky-like factor `L` of `A`:
+/// With `A = L D L'` (`L` lower triangular with unit diagonal, `D` the
+/// Mendelian sampling variances), `A[i, i] = sum_j L[i, j]^2 D[j]`, and the
+/// row `L[i, .]` is non-zero only on the ancestors of `i`:
 ///
 /// ```text
-/// L[i, i] = sqrt(d_i)                              (Mendelian sampling variance)
-/// L[i, j] = 0.5 * (L[s, j] + L[d, j])   for j < i
-/// F[i]    = sum_j L[i, j]^2 - 1 = A[i, i] - 1
+/// L[i, i]    = 1
+/// L[i, s_j] += 0.5 * L[i, j],  L[i, d_j] += 0.5 * L[i, j]   (s_j, d_j: parents of j)
+/// D[j]       = 0.5 - 0.25 * (F[s_j] + F[d_j])   (F of an unknown parent = -1)
+/// F[i]       = sum_j L[i, j]^2 D[j] - 1
 /// ```
 ///
-/// Only O(n) working memory is needed because each animal's row of `L` is
-/// accumulated over its ancestors and discarded.
+/// For each animal the ancestors are visited from the youngest to the
+/// oldest (a max-heap on the pedigree index), so every ancestor has received
+/// the contributions of all its descendants in the path before it passes
+/// half of its coefficient on to its own parents. The work per animal is
+/// proportional to its number of ancestors, and only O(n) working memory is
+/// needed. Consecutive full sibs share the same coefficient.
 ///
 /// # Returns
 ///
 /// A vector of inbreeding coefficients, one per animal.
+///
+/// # Errors
+///
+/// Returns an error if the pedigree is not sorted.
 pub fn compute_inbreeding(ped: &Pedigree) -> Result<Vec<f64>> {
+    use std::collections::BinaryHeap;
+
     let n = ped.n_animals();
+    if !ped.is_sorted() && n > 0 {
+        return Err(LmmError::Pedigree(
+            "Pedigree must be topologically sorted before computing inbreeding. \
+             Call sort_pedigree() first."
+                .to_string(),
+        ));
+    }
+
     let mut f = vec![0.0_f64; n];
-
-    // For each animal, we need to compute F[i] = 0.5 * A[sire_i, dam_i].
-    // To get A[sire_i, dam_i] we use the Quaas (1976) path-tracing approach:
-    //   A[p, q] = sum over ancestors path coefficients.
-    //
-    // Meuwissen & Luo (1992) efficient implementation:
-    //
-    // For each animal i in pedigree order:
-    //   If both parents unknown or one parent unknown: F[i] = 0
-    //   If both parents known:
-    //     Compute A[s, d] using path coefficients through the L-D-L'
-    //     decomposition, where:
-    //       d[j] = Mendelian sampling variance of animal j
-    //       A[s, d] = sum_j (L[s,j] * d[j] * L[d,j])
-    //
-    // We build L implicitly. For animal i:
-    //   L[i, i] = 1
-    //   L[i, j] = 0.5 * (L[sire_i, j] + L[dam_i, j])  for j < i
-    //
-    // To compute A[s, d] we only need L rows for s and d, but storing all of
-    // L is O(n^2). Instead, we use the Colleau (2002) indirect method, or
-    // Henderson's simple recursive formula for small/medium pedigrees.
-    //
-    // For practical plant breeding pedigrees (typically < 100k animals), we
-    // use the straightforward recursive approach from Quaas (1976):
-
-    // The following implements the "tabular method with pruning" approach.
-    // For each animal i (in sorted order), we compute F[i] by tracing the
-    // relationship between its parents.
+    let mut d = vec![0.0_f64; n];
+    // Path coefficients L[i, j] of the current animal, and whether `j` is
+    // currently queued.
+    let mut l = vec![0.0_f64; n];
+    let mut queued = vec![false; n];
+    let mut heap: BinaryHeap<usize> = BinaryHeap::new();
 
     for i in 0..n {
         let sire = ped.sire(i);
         let dam = ped.dam(i);
+        let f_parent = |p: Option<usize>, f: &[f64]| p.map_or(-1.0, |p| f[p]);
+        d[i] = 0.5 - 0.25 * (f_parent(sire, &f) + f_parent(dam, &f));
 
-        match (sire, dam) {
-            (Some(s), Some(d)) => {
-                // F[i] = 0.5 * A[s, d]
-                // Compute A[s, d] using the recursive relationship.
-                // A[p, q] where p >= q (assume s and d are both < i due to sort):
-                // We compute this by tracing through ancestors.
-                let a_sd = relationship(ped, s, d, &f);
-                f[i] = 0.5 * a_sd;
-            }
-            _ => {
-                // One or both parents unknown: F[i] = 0.
-                f[i] = 0.0;
+        let (Some(s), Some(dm)) = (sire, dam) else {
+            // With an unknown parent the animal cannot be inbred.
+            f[i] = 0.0;
+            continue;
+        };
+        if i > 0 && ped.sire(i - 1) == Some(s) && ped.dam(i - 1) == Some(dm) {
+            f[i] = f[i - 1];
+            continue;
+        }
+
+        let mut a_ii = 0.0;
+        l[i] = 1.0;
+        heap.push(i);
+        queued[i] = true;
+        while let Some(j) = heap.pop() {
+            queued[j] = false;
+            let lj = l[j];
+            l[j] = 0.0;
+            a_ii += lj * lj * d[j];
+            for parent in [ped.sire(j), ped.dam(j)].into_iter().flatten() {
+                l[parent] += 0.5 * lj;
+                if !queued[parent] {
+                    queued[parent] = true;
+                    heap.push(parent);
+                }
             }
         }
+        f[i] = a_ii - 1.0;
     }
 
     Ok(f)
-}
-
-/// Compute the additive relationship coefficient A[p, q] between two animals
-/// p and q, given known inbreeding coefficients for all animals with index
-/// less than max(p, q).
-///
-/// Uses the recursive formula:
-///   A[p, q] = 0.5 * (A[p, sire_q] + A[p, dam_q])  if p < q
-///   A[p, p] = 1 + F[p]
-///   A[p, q] = A[q, p]
-///
-/// This is O(n) per call in the worst case (long ancestor chains), but
-/// for typical pedigrees with moderate depth it is efficient enough.
-///
-/// We use memoization via a local cache to avoid exponential blowup.
-fn relationship(ped: &Pedigree, p: usize, q: usize, f: &[f64]) -> f64 {
-    // Use an iterative approach with a work stack to avoid deep recursion.
-    use std::collections::HashMap;
-    let mut cache: HashMap<(usize, usize), f64> = HashMap::new();
-    relationship_cached(ped, p, q, f, &mut cache)
-}
-
-fn relationship_cached(
-    ped: &Pedigree,
-    p: usize,
-    q: usize,
-    f: &[f64],
-    cache: &mut std::collections::HashMap<(usize, usize), f64>,
-) -> f64 {
-    // Ensure p <= q for canonical form.
-    let (a, b) = if p <= q { (p, q) } else { (q, p) };
-
-    if let Some(&val) = cache.get(&(a, b)) {
-        return val;
-    }
-
-    let result = if a == b {
-        // A[a, a] = 1 + F[a]
-        1.0 + f[a]
-    } else {
-        // a < b: A[a, b] = 0.5 * (A[a, sire_b] + A[a, dam_b])
-        let sire_b = ped.sire(b);
-        let dam_b = ped.dam(b);
-
-        match (sire_b, dam_b) {
-            (Some(s), Some(d)) => {
-                0.5 * (relationship_cached(ped, a, s, f, cache)
-                    + relationship_cached(ped, a, d, f, cache))
-            }
-            (Some(s), None) => 0.5 * relationship_cached(ped, a, s, f, cache),
-            (None, Some(d)) => 0.5 * relationship_cached(ped, a, d, f, cache),
-            (None, None) => 0.0,
-        }
-    };
-
-    cache.insert((a, b), result);
-    result
 }
 
 #[cfg(test)]
@@ -815,5 +769,74 @@ mod tests {
         assert_approx(dense[1][1], 4.0 / 3.0, "A_inv[1,1]");
         assert_approx(dense[0][1], -2.0 / 3.0, "A_inv[0,1]");
         assert_approx(dense[1][0], -2.0 / 3.0, "A_inv[1,0]");
+    }
+
+    /// Inbred multi-generation pedigree with selfing-like full-sib and
+    /// half-sib matings, one-parent animals and consecutive full sibs.
+    fn inbred_pedigree(generations: usize, per_generation: usize) -> Pedigree {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let mut triples = Vec::new();
+        let mut previous: Vec<String> = Vec::new();
+        for g in 0..generations {
+            let mut current = Vec::new();
+            let mut a = 0;
+            while a < per_generation {
+                let parents = if g == 0 {
+                    (None, None)
+                } else {
+                    // Parents from a small pool of the previous generation.
+                    let pool = (previous.len() / 4).max(2);
+                    let sire = previous[rng.gen_range(0..pool)].clone();
+                    let dam = previous[rng.gen_range(0..pool)].clone();
+                    match rng.gen_range(0..10) {
+                        0 => (Some(sire), None),
+                        1 => (None, Some(dam)),
+                        _ => (Some(sire), Some(dam)),
+                    }
+                };
+                // Up to three full sibs in a row.
+                for _ in 0..rng.gen_range(1..=3) {
+                    if a == per_generation {
+                        break;
+                    }
+                    let id = format!("g{}_{}", g, a);
+                    triples.push((id.clone(), parents.0.clone(), parents.1.clone()));
+                    current.push(id);
+                    a += 1;
+                }
+            }
+            previous = current;
+        }
+        let mut ped = Pedigree::from_triples(&triples).unwrap();
+        ped.sort_pedigree().unwrap();
+        ped
+    }
+
+    #[test]
+    fn test_inbreeding_matches_tabular_a_matrix() {
+        let ped = inbred_pedigree(8, 40);
+        let f = compute_inbreeding(&ped).unwrap();
+        let a = crate::genetics::compute_a_matrix(&ped).unwrap();
+        assert!(f.iter().any(|&fi| fi > 0.1), "pedigree should be inbred");
+        for i in 0..ped.n_animals() {
+            assert!(
+                (f[i] - (a[(i, i)] - 1.0)).abs() < 1e-12,
+                "F[{}] = {} but A[{},{}] - 1 = {}",
+                i,
+                f[i],
+                i,
+                i,
+                a[(i, i)] - 1.0
+            );
+        }
+    }
+
+    #[test]
+    fn test_inbreeding_unsorted_errors() {
+        let triples = vec![("1".to_string(), None, None), ("2".to_string(), None, None)];
+        let ped = Pedigree::from_triples(&triples).unwrap();
+        assert!(!ped.is_sorted());
+        assert!(compute_inbreeding(&ped).is_err());
     }
 }
