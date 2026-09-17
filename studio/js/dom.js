@@ -92,13 +92,23 @@ export function toCsv(header, rows) {
 }
 
 export function segmented(options, current, onChange, { block = false, label } = {}) {
-  return h("div", { class: `segmented${block ? " block" : ""}`, attrs: { role: "group", "aria-label": label } },
-    options.map(([value, text]) => h("button", {
-      type: "button",
-      text,
-      attrs: { "aria-pressed": String(value === current) },
-      on: { click: () => { if (value !== current) onChange(value); } },
-    })));
+  // The control tracks its own selection, so it stays correct whether or not
+  // the caller re-renders it after a change.
+  let selected = current;
+  const buttons = options.map(([value, text]) => h("button", {
+    type: "button",
+    text,
+    attrs: { "aria-pressed": String(value === selected) },
+    on: {
+      click: () => {
+        if (value === selected) return;
+        selected = value;
+        buttons.forEach((b, i) => b.setAttribute("aria-pressed", String(options[i][0] === selected)));
+        onChange(value);
+      },
+    },
+  }));
+  return h("div", { class: `segmented${block ? " block" : ""}`, attrs: { role: "group", "aria-label": label } }, buttons);
 }
 
 export function select(options, current, onChange, props = {}) {

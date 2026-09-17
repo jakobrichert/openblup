@@ -50,6 +50,15 @@ python3 -m http.server --directory studio 8000
 # open http://localhost:8000
 ```
 
+Browser tests (every example and result tab, and switching between 3D
+scenes) run in CI with Playwright; locally:
+
+```bash
+npm install --prefix studio/tests --no-save playwright-core
+python3 -m http.server 8765 --directory studio &
+CHROME_PATH="/path/to/chrome" node studio/tests/e2e.mjs   # or install Playwright's Chromium
+```
+
 `build.sh` runs `wasm-opt` too when it is installed. Any static file server
 works; the page needs to be served over HTTP (not opened as a file) for the
 module worker to load. The `Studio` GitHub Actions workflow builds and tests
@@ -75,7 +84,9 @@ studio/
 │   ├── worker.js       # loads pkg/openblup_studio.js and runs inspect/fit
 │   ├── dom.js          # tiny DOM helpers (data is always inserted as text)
 │   └── format.js       # number formatting
-└── tests/smoke.mjs     # Node smoke test of the engine bindings
+└── tests/
+    ├── smoke.mjs       # Node smoke test of the engine bindings
+    └── e2e.mjs         # browser tests (Playwright)
 ```
 
 The engine side is `crates/studio` (`openblup-studio`). It exposes three JSON
