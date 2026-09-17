@@ -213,7 +213,10 @@ impl PyPedigree {
         sparse_to_scipy_csc(py, &ainv)
     }
 
-    /// Compute inbreeding coefficients for all animals (pedigree order).
+    /// Compute inbreeding coefficients for all animals (pedigree order,
+    /// Meuwissen & Luo algorithm).
+    ///
+    /// The pedigree must be sorted first (call .sort()).
     ///
     /// Returns
     /// -------
