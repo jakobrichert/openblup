@@ -6,7 +6,10 @@ use crate::matrix::sparse::spmv;
 use crate::model::MixedModel;
 use crate::types::SparseMat;
 
-use super::mme::{MmeInverse, SparseMixedModelEquations};
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex};
+
+use super::mme::{MmeInverse, SparseMixedModelEquations, SparseMmeStructure};
 use super::result::{FitResult, NamedEffect, RandomEffectBlock, RemlIteration, VarianceEstimate};
 
 /// REML engine using the Average Information algorithm (Gilmour, Thompson &
@@ -17,14 +20,19 @@ use super::result::{FitResult, NamedEffect, RandomEffectBlock, RemlIteration, Va
 /// REML log-likelihood.  This provides quadratic convergence near the
 /// optimum, unlike the linear convergence of EM-REML.
 ///
-/// The implementation starts with a configurable number of EM-REML steps
-/// to obtain good starting values, then switches to AI updates for fast
-/// convergence.  Step-halving is used if a Newton update produces negative
-/// variance estimates or decreases the log-likelihood.
+/// Newton (AI) updates are taken from the first iteration, as in ASReml and
+/// airemlf90; an optional number of EM-REML burn-in steps can be requested
+/// with [`em_initial_steps`](Self::em_initial_steps). A Newton update that
+/// decreases the log-likelihood is backtracked (step-halving) and followed by
+/// a few EM steps, which increase the likelihood monotonically.
 pub struct AiReml {
     max_iter: usize,
     tol: f64,
     em_initial_steps: usize,
+    /// MME structure of the last model evaluated by
+    /// [`log_likelihood_at`](Self::log_likelihood_at), keyed by a fingerprint
+    /// of the model's data.
+    structure_cache: Mutex<Option<(u64, Arc<SparseMmeStructure>)>>,
 }
 
 impl AiReml {
@@ -36,11 +44,14 @@ impl AiReml {
         Self {
             max_iter,
             tol,
-            em_initial_steps: 5,
+            em_initial_steps: 0,
+            structure_cache: Mutex::new(None),
         }
     }
 
-    /// Set the number of EM burn-in iterations (default 5).
+    /// Set the number of EM burn-in iterations before the first Newton step
+    /// (default 0: every iteration costs a factorization and the selected
+    /// inversion, so burn-in steps only add iterations on well-posed models).
     pub fn em_initial_steps(mut self, n: usize) -> Self {
         self.em_initial_steps = n;
         self
@@ -74,8 +85,9 @@ impl AiReml {
             .map(|vs| vs.params()[0])
             .chain([model.residual_var_struct.params()[0]])
             .collect();
+        let structure = self.cached_structure(model);
         let logl = self
-            .solve_at(model, &theta[..k], theta[k])
+            .solve_at(model, &structure, &theta[..k], theta[k])
             .map(|(mme, sol)| self.log_likelihood(model, &mme, &sol, &theta[..k], theta[k]));
         for (vs, s) in model.random_var_structs.iter_mut().zip(&saved) {
             vs.set_params(&[*s])?;
@@ -84,7 +96,24 @@ impl AiReml {
         logl
     }
 
-    /// Fit the model using AI-REML with EM burn-in.
+    /// The MME structure of `model`, reused while the model data are unchanged.
+    fn cached_structure(&self, model: &MixedModel) -> Arc<SparseMmeStructure> {
+        let key = model_fingerprint(model);
+        let mut cache = self
+            .structure_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match cache.as_ref() {
+            Some((k, structure)) if *k == key => Arc::clone(structure),
+            _ => {
+                let structure = Arc::new(SparseMmeStructure::for_model(model));
+                *cache = Some((key, Arc::clone(&structure)));
+                structure
+            }
+        }
+    }
+
+    /// Fit the model using AI-REML (with EM fallback).
     ///
     /// Models with multi-parameter variance structures (AR1, Diagonal,
     /// Unstructured, FactorAnalytic, Kronecker interactions) or a structured
@@ -96,6 +125,9 @@ impl AiReml {
         let n = model.n_obs;
         let n_random_terms = model.random_var_structs.len();
         let n_params = n_random_terms + 1; // random variances + residual
+                                           // Pattern, ordering and symbolic factorization are shared by all
+                                           // iterations.
+        let structure = SparseMmeStructure::for_model(model);
 
         // ---- initialise variance parameters ----
         let y = &model.y;
@@ -141,7 +173,7 @@ impl AiReml {
             // Solve the MME at the current parameters. A failure right after
             // an AI step (e.g. a wild Newton step made C numerically
             // singular) is treated like a likelihood decrease below.
-            let mut current = match self.solve_at(model, &sigma2_random, sigma2_e) {
+            let mut current = match self.solve_at(model, &structure, &sigma2_random, sigma2_e) {
                 Ok((m, s)) => {
                     let l = self.log_likelihood(model, &m, &s, &sigma2_random, sigma2_e);
                     Some((m, s, l))
@@ -177,7 +209,7 @@ impl AiReml {
                         .map(|(p, f)| (p + frac * (f - p)).max(floor))
                         .collect();
                     let trial_e = (prev_e + frac * (full_e - prev_e)).max(floor);
-                    if let Ok((m, s)) = self.solve_at(model, &trial_random, trial_e) {
+                    if let Ok((m, s)) = self.solve_at(model, &structure, &trial_random, trial_e) {
                         let l = self.log_likelihood(model, &m, &s, &trial_random, trial_e);
                         if l >= prev_logl - logl_tol {
                             sigma2_random = trial_random;
@@ -192,7 +224,7 @@ impl AiReml {
                 if !accepted {
                     sigma2_random = prev_random;
                     sigma2_e = prev_e;
-                    let (m, s) = self.solve_at(model, &sigma2_random, sigma2_e)?;
+                    let (m, s) = self.solve_at(model, &structure, &sigma2_random, sigma2_e)?;
                     current = Some((m, s, prev_logl));
                     forced_em_steps = 3;
                 }
@@ -304,7 +336,7 @@ impl AiReml {
         }
 
         // ---- final solve with converged parameters ----
-        let (mme, sol) = self.solve_at(model, &sigma2_random, sigma2_e)?;
+        let (mme, sol) = self.solve_at(model, &structure, &sigma2_random, sigma2_e)?;
         let c_inv = sol.inverse()?;
         let residuals = self.residuals(model, &sol);
 
@@ -399,6 +431,7 @@ impl AiReml {
     fn solve_at(
         &self,
         model: &mut MixedModel,
+        structure: &SparseMmeStructure,
         sigma2_random: &[f64],
         sigma2_e: f64,
     ) -> Result<(SparseMixedModelEquations, super::mme::MmeSolution)> {
@@ -407,24 +440,8 @@ impl AiReml {
         }
         model.residual_var_struct.set_params(&[sigma2_e])?;
 
-        let g_inv_blocks: Vec<sprs::CsMat<f64>> = (0..sigma2_random.len())
-            .map(|k| {
-                let q = model.z_blocks[k].cols();
-                if let Some(ref ginv_k) = model.ginv_matrices[k] {
-                    ginv_k.map(|v| v / sigma2_random[k])
-                } else {
-                    crate::matrix::sparse::sparse_diagonal(&vec![1.0 / sigma2_random[k]; q])
-                }
-            })
-            .collect();
-
-        let mme = SparseMixedModelEquations::assemble(
-            &model.x,
-            &model.z_blocks,
-            &model.y,
-            1.0 / sigma2_e,
-            &g_inv_blocks,
-        );
+        let scales: Vec<f64> = sigma2_random.iter().map(|s| 1.0 / s).collect();
+        let mme = structure.assemble(1.0 / sigma2_e, &scales);
         let sol = mme.solve()?;
         Ok((mme, sol))
     }
@@ -507,7 +524,7 @@ impl AiReml {
                 (uq, tr)
             } else {
                 let uq = u_k.iter().map(|u| u * u).sum::<f64>();
-                let tr = sol.c_inv_diag[block_start..block_start + q_k]
+                let tr = sol.c_inv_diag()[block_start..block_start + q_k]
                     .iter()
                     .sum::<f64>();
                 (uq, tr)
@@ -830,7 +847,7 @@ impl AiReml {
                 term: label.term.clone(),
                 level: label.level.clone(),
                 estimate: sol.fixed_effects[i],
-                se: sol.c_inv_diag[i].sqrt(),
+                se: sol.c_inv_diag()[i].sqrt(),
             })
             .collect();
 
@@ -845,7 +862,7 @@ impl AiReml {
                     term: model.random_term_names[k].clone(),
                     level: level_name.clone(),
                     estimate: sol.random_effects[k][j],
-                    se: sol.c_inv_diag[block_offset + j].sqrt(),
+                    se: sol.c_inv_diag()[block_offset + j].sqrt(),
                 })
                 .collect();
             random_effects.push(RandomEffectBlock {
@@ -932,6 +949,33 @@ fn relative_change(
         return 0.0;
     }
     (diff2 / norm2).sqrt()
+}
+
+/// A hash of everything the MME structure is built from.
+fn model_fingerprint(model: &MixedModel) -> u64 {
+    fn sparse(h: &mut impl Hasher, m: &SparseMat) {
+        m.shape().hash(h);
+        m.indptr().raw_storage().hash(h);
+        m.indices().hash(h);
+        for v in m.data() {
+            v.to_bits().hash(h);
+        }
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for v in &model.y {
+        v.to_bits().hash(&mut h);
+    }
+    sparse(&mut h, &model.x);
+    for z in &model.z_blocks {
+        sparse(&mut h, z);
+    }
+    for g in &model.ginv_matrices {
+        match g {
+            Some(g) => sparse(&mut h, g),
+            None => 0u8.hash(&mut h),
+        }
+    }
+    h.finish()
 }
 
 #[cfg(test)]
@@ -1116,8 +1160,9 @@ mod tests {
 
         let sigma2_random = vec![result.variance_components[0].parameters[0].1];
         let sigma2_e = result.variance_components[1].parameters[0].1;
+        let structure = SparseMmeStructure::for_model(&model);
         let (mme, sol) = solver
-            .solve_at(&mut model, &sigma2_random, sigma2_e)
+            .solve_at(&mut model, &structure, &sigma2_random, sigma2_e)
             .unwrap();
         let c_inv = sol.c_inv.as_ref().unwrap();
         let residuals = solver.residuals(&model, &sol);
@@ -1221,7 +1266,7 @@ mod tests {
         let result_em = solver_em.fit(&mut model_em).unwrap();
 
         // AI-REML must converge in strictly fewer iterations than EM-REML:
-        // after the EM burn-in the Newton steps converge quadratically.
+        // the Newton steps converge quadratically.
         assert!(
             result_ai.n_iterations < result_em.n_iterations,
             "AI-REML ({} iters) should take fewer iterations than EM-REML ({} iters)",

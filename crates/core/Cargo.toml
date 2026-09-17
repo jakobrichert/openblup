@@ -22,6 +22,10 @@ log = { workspace = true }
 indexmap = { workspace = true }
 rand = { workspace = true }
 
+# Multithreaded dense kernels (there are no threads in WebAssembly).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+faer = { workspace = true, features = ["rayon"] }
+
 [dev-dependencies]
 approx = { workspace = true }
 serde_json = { workspace = true }

@@ -1,43 +1,71 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use nalgebra::{DMatrix, DVector};
 use sprs::CsMat;
 
 use crate::error::{LmmError, Result};
 use crate::matrix::sparse::{xt_y, TripletBuilder};
-use crate::matrix::sparse_cholesky::SparseCholeskySolver;
+use crate::matrix::sparse_cholesky::{CholeskyAnalysis, SparseCholeskySolver};
 use crate::types::SparseMat;
 
 /// The inverse of the MME coefficient matrix, as needed by REML.
 ///
 /// * `Dense` holds the full `C⁻¹` (used by the general engine for structured
 ///   models, whose `C` is dense anyway).
-/// * `Sparse` holds the entries of `C⁻¹` on the pattern of the sparse
-///   Cholesky factor (Takahashi inverse subset), the factorization itself
-///   (for `C⁻¹ v` products) and the `p` columns of `C⁻¹` belonging to the
-///   fixed effects. This is what the scalar-residual engines use, and it is
-///   what makes animal models with many thousands of equations tractable.
+/// * `Sparse` holds the sparse Cholesky factorization of `C`. The entries of
+///   `C⁻¹` on the pattern of the factor (the selected inverse) and the `p`
+///   columns of `C⁻¹` belonging to the fixed effects are computed on first
+///   use, so an evaluation that only needs the solution and `log|C|` (a line
+///   search step, a likelihood surface) never pays for them. This is what
+///   the scalar-residual engines use, and it is what makes animal models with
+///   many thousands of equations tractable.
 #[derive(Debug, Clone)]
 pub enum MmeInverse {
     /// Full dense inverse.
     Dense(DMatrix<f64>),
-    /// Sparse inverse subset with the factorization and the fixed-effect columns.
+    /// Sparse factorization with lazily computed inverse entries.
     Sparse {
-        /// `C⁻¹` on the pattern of `L + L'` (symmetric, both triangles).
-        subset: SparseMat,
-        /// Cholesky factorization of `C` (for solves).
+        /// Cholesky factorization of `C` (solves, selected inverse).
         solver: Arc<SparseCholeskySolver>,
-        /// `C⁻¹[:, 0..p]` (dim x p).
-        fixed_cols: DMatrix<f64>,
+        /// Number of fixed effects `p`.
+        n_fixed: usize,
+        /// `C⁻¹[:, 0..p]` (dim x p), computed on first use.
+        fixed_cols: OnceLock<DMatrix<f64>>,
     },
 }
 
 impl MmeInverse {
+    /// The sparse variant for a factorization with `n_fixed` fixed effects.
+    pub fn sparse(solver: Arc<SparseCholeskySolver>, n_fixed: usize) -> Self {
+        MmeInverse::Sparse {
+            solver,
+            n_fixed,
+            fixed_cols: OnceLock::new(),
+        }
+    }
+
     /// Dimension of the MME.
     pub fn dim(&self) -> usize {
         match self {
             MmeInverse::Dense(m) => m.nrows(),
-            MmeInverse::Sparse { subset, .. } => subset.rows(),
+            MmeInverse::Sparse { solver, .. } => solver.dim(),
+        }
+    }
+
+    fn sparse_fixed_cols(&self) -> &DMatrix<f64> {
+        match self {
+            MmeInverse::Sparse {
+                solver,
+                n_fixed,
+                fixed_cols,
+            } => fixed_cols.get_or_init(|| {
+                let n = solver.dim();
+                let identity = DMatrix::from_fn(n, *n_fixed, |i, j| if i == j { 1.0 } else { 0.0 });
+                solver
+                    .solve_many(&identity)
+                    .expect("dimensions match the factorization")
+            }),
+            MmeInverse::Dense(_) => unreachable!("only called for the sparse variant"),
         }
     }
 
@@ -49,15 +77,15 @@ impl MmeInverse {
         match self {
             MmeInverse::Dense(m) => m[(i, j)],
             MmeInverse::Sparse {
-                subset, fixed_cols, ..
+                solver, n_fixed, ..
             } => {
-                let p = fixed_cols.ncols();
+                let p = *n_fixed;
                 if j < p {
-                    fixed_cols[(i, j)]
+                    self.sparse_fixed_cols()[(i, j)]
                 } else if i < p {
-                    fixed_cols[(j, i)]
+                    self.sparse_fixed_cols()[(j, i)]
                 } else {
-                    subset.get(i, j).copied().unwrap_or(0.0)
+                    solver.inverse_subset().get(i, j).unwrap_or(0.0)
                 }
             }
         }
@@ -67,9 +95,7 @@ impl MmeInverse {
     pub fn diagonal(&self) -> Vec<f64> {
         match self {
             MmeInverse::Dense(m) => (0..m.nrows()).map(|i| m[(i, i)]).collect(),
-            MmeInverse::Sparse { subset, .. } => (0..subset.rows())
-                .map(|i| subset.get(i, i).copied().unwrap_or(0.0))
-                .collect(),
+            MmeInverse::Sparse { solver, .. } => solver.inverse_diagonal(),
         }
     }
 
@@ -85,7 +111,7 @@ impl MmeInverse {
     pub fn fixed_columns(&self, p: usize) -> DMatrix<f64> {
         match self {
             MmeInverse::Dense(m) => m.columns(0, p).into_owned(),
-            MmeInverse::Sparse { fixed_cols, .. } => fixed_cols.clone(),
+            MmeInverse::Sparse { .. } => self.sparse_fixed_cols().columns(0, p).into_owned(),
         }
     }
 
@@ -93,7 +119,7 @@ impl MmeInverse {
     pub fn fixed_block(&self, p: usize) -> DMatrix<f64> {
         match self {
             MmeInverse::Dense(m) => m.view((0, 0), (p, p)).into_owned(),
-            MmeInverse::Sparse { fixed_cols, .. } => fixed_cols.rows(0, p).into_owned(),
+            MmeInverse::Sparse { .. } => self.sparse_fixed_cols().view((0, 0), (p, p)).into_owned(),
         }
     }
 
@@ -118,20 +144,201 @@ impl MmeInverse {
     pub fn to_dense(&self) -> Result<DMatrix<f64>> {
         match self {
             MmeInverse::Dense(m) => Ok(m.clone()),
-            MmeInverse::Sparse { solver, .. } => {
-                let n = solver.dim();
-                let mut out = DMatrix::zeros(n, n);
-                let mut e = vec![0.0; n];
-                for j in 0..n {
-                    e[j] = 1.0;
-                    let col = solver.solve(&e)?;
-                    e[j] = 0.0;
-                    for i in 0..n {
-                        out[(i, j)] = col[i];
+            MmeInverse::Sparse { solver, .. } => solver.inverse(),
+        }
+    }
+}
+
+/// The fixed sparsity structure of the scalar-residual MME of one model,
+///
+/// ```text
+/// C = W'W / σ²_e + Σ_k K_k⁻¹ / σ²_k,   rhs = W'y / σ²_e,   W = [X Z_1 ... Z_r]
+/// ```
+///
+/// built once and reused for every set of variances: [`assemble`](Self::assemble)
+/// only rescales stored values on a fixed pattern, and the fill-reducing
+/// ordering and supernodal analysis of that pattern are computed on the first
+/// factorization and shared by all later ones.
+#[derive(Debug)]
+pub struct SparseMmeStructure {
+    dim: usize,
+    n_fixed: usize,
+    n_random: Vec<usize>,
+    indptr: Vec<usize>,
+    indices: Vec<usize>,
+    /// `W'W` on the pattern.
+    ww: Vec<f64>,
+    /// `K_k⁻¹` (identity when there is no relationship matrix) on the
+    /// pattern, one per random term.
+    k_inv: Vec<Vec<f64>>,
+    /// `W'y`.
+    wty: Vec<f64>,
+    analysis: Arc<OnceLock<Arc<CholeskyAnalysis>>>,
+}
+
+/// Values of `m` on a (super-)pattern given as sorted CSC arrays.
+fn align_to_pattern(indptr: &[usize], indices: &[usize], m: &CsMat<f64>) -> Vec<f64> {
+    let mut out = vec![0.0; indices.len()];
+    let m_indptr = m.indptr();
+    let m_indptr = m_indptr.raw_storage();
+    for j in 0..indptr.len() - 1 {
+        let pattern = &indices[indptr[j]..indptr[j + 1]];
+        let mut pos = 0;
+        for a in m_indptr[j] - m_indptr[0]..m_indptr[j + 1] - m_indptr[0] {
+            let i = m.indices()[a];
+            let off = pattern[pos..]
+                .binary_search(&i)
+                .expect("the pattern contains every source entry");
+            pos += off;
+            out[indptr[j] + pos] += m.data()[a];
+        }
+    }
+    out
+}
+
+impl SparseMmeStructure {
+    /// Build the structure from the design matrices, the response and the
+    /// relationship-matrix inverses (`None` = identity) of the random terms.
+    pub fn new(
+        x: &CsMat<f64>,
+        z_blocks: &[CsMat<f64>],
+        y: &[f64],
+        k_inv: &[Option<&CsMat<f64>>],
+    ) -> Self {
+        assert_eq!(k_inv.len(), z_blocks.len(), "one K⁻¹ per random term");
+        let n = y.len();
+        let p = x.cols();
+        let q_vec: Vec<usize> = z_blocks.iter().map(|z| z.cols()).collect();
+        let dim = p + q_vec.iter().sum::<usize>();
+        let mut offsets = Vec::with_capacity(z_blocks.len());
+        let mut off = p;
+        for q in &q_vec {
+            offsets.push(off);
+            off += q;
+        }
+
+        // W'W = Σ_i w_i w_i', one observation at a time.
+        let x_csr = x.to_csr();
+        let z_csr: Vec<CsMat<f64>> = z_blocks.iter().map(|z| z.to_csr()).collect();
+        let mut builder = TripletBuilder::new(dim, dim);
+        let mut row: Vec<(usize, f64)> = Vec::new();
+        for i in 0..n {
+            row.clear();
+            if let Some(r) = x_csr.outer_view(i) {
+                row.extend(r.iter().map(|(c, v)| (c, *v)));
+            }
+            for (k, z) in z_csr.iter().enumerate() {
+                if let Some(r) = z.outer_view(i) {
+                    row.extend(r.iter().map(|(c, v)| (offsets[k] + c, *v)));
+                }
+            }
+            for (a, (ca, va)) in row.iter().enumerate() {
+                builder.add(*ca, *ca, va * va);
+                for (cb, vb) in row.iter().skip(a + 1) {
+                    builder.add_symmetric(*ca, *cb, va * vb);
+                }
+            }
+        }
+        let ww = builder.to_csc();
+
+        // K⁻¹ blocks placed on the diagonal of the MME.
+        let blocks: Vec<CsMat<f64>> = (0..z_blocks.len())
+            .map(|k| {
+                let q = q_vec[k];
+                let mut b = TripletBuilder::new(dim, dim);
+                match k_inv[k] {
+                    Some(m) => {
+                        for (v, (i, j)) in m.iter() {
+                            b.add(offsets[k] + i, offsets[k] + j, *v);
+                        }
+                    }
+                    None => {
+                        for i in 0..q {
+                            b.add(offsets[k] + i, offsets[k] + i, 1.0);
+                        }
                     }
                 }
-                Ok(out)
+                b.to_csc()
+            })
+            .collect();
+
+        // Union pattern (sorted rows per column).
+        let mut indptr = Vec::with_capacity(dim + 1);
+        let mut indices = Vec::new();
+        indptr.push(0);
+        let mut col: Vec<usize> = Vec::new();
+        for j in 0..dim {
+            col.clear();
+            for m in std::iter::once(&ww).chain(blocks.iter()) {
+                if let Some(v) = m.outer_view(j) {
+                    col.extend(v.indices().iter().copied());
+                }
             }
+            col.sort_unstable();
+            col.dedup();
+            indices.extend_from_slice(&col);
+            indptr.push(indices.len());
+        }
+
+        let mut wty = xt_y(x, y);
+        for z in z_blocks {
+            wty.extend(xt_y(z, y));
+        }
+
+        Self {
+            dim,
+            n_fixed: p,
+            n_random: q_vec,
+            ww: align_to_pattern(&indptr, &indices, &ww),
+            k_inv: blocks
+                .iter()
+                .map(|b| align_to_pattern(&indptr, &indices, b))
+                .collect(),
+            indptr,
+            indices,
+            wty,
+            analysis: Arc::new(OnceLock::new()),
+        }
+    }
+
+    /// The structure of a model's scalar-residual MME.
+    pub fn for_model(model: &crate::model::MixedModel) -> Self {
+        let k_inv: Vec<Option<&CsMat<f64>>> =
+            model.ginv_matrices.iter().map(|g| g.as_ref()).collect();
+        Self::new(&model.x, &model.z_blocks, &model.y, &k_inv)
+    }
+
+    /// Number of fixed effects.
+    pub fn n_fixed(&self) -> usize {
+        self.n_fixed
+    }
+
+    /// The MME for `1/σ²_e = r_inv_scale` and `1/σ²_k = random_scales[k]`.
+    pub fn assemble(&self, r_inv_scale: f64, random_scales: &[f64]) -> SparseMixedModelEquations {
+        assert_eq!(
+            random_scales.len(),
+            self.k_inv.len(),
+            "one scale per random term"
+        );
+        let mut values: Vec<f64> = self.ww.iter().map(|v| v * r_inv_scale).collect();
+        for (k_values, &scale) in self.k_inv.iter().zip(random_scales) {
+            for (v, k) in values.iter_mut().zip(k_values) {
+                *v += scale * k;
+            }
+        }
+        let coeff_matrix = CsMat::new_csc(
+            (self.dim, self.dim),
+            self.indptr.clone(),
+            self.indices.clone(),
+            values,
+        );
+        SparseMixedModelEquations {
+            coeff_matrix,
+            rhs: self.wty.iter().map(|v| v * r_inv_scale).collect(),
+            n_fixed: self.n_fixed,
+            n_random: self.n_random.clone(),
+            dim: self.dim,
+            analysis: Some(Arc::clone(&self.analysis)),
         }
     }
 }
@@ -140,9 +347,9 @@ impl MmeInverse {
 ///
 /// Same system as [`MixedModelEquations`] but `C` is assembled as a sparse
 /// matrix (`W'W / σ²_e` plus the sparse `G⁻¹` blocks) and solved with the
-/// sparse Cholesky solver; the inverse is obtained as a Takahashi subset.
-/// This is the path taken for models with an IID residual, i.e. the usual
-/// animal / genomic / plant-trial models.
+/// sparse Cholesky solver; the inverse entries REML needs are computed on
+/// demand (see [`MmeInverse`]). This is the path taken for models with an
+/// IID residual, i.e. the usual animal / genomic / plant-trial models.
 #[derive(Debug)]
 pub struct SparseMixedModelEquations {
     /// The coefficient matrix C (symmetric, both triangles stored, CSC).
@@ -155,12 +362,15 @@ pub struct SparseMixedModelEquations {
     pub n_random: Vec<usize>,
     /// Total dimension of the system.
     pub dim: usize,
+    /// Shared symbolic analysis of the pattern (see [`SparseMmeStructure`]).
+    analysis: Option<Arc<OnceLock<Arc<CholeskyAnalysis>>>>,
 }
 
 impl SparseMixedModelEquations {
     /// Assemble the MME for `R = σ²_e I` (`r_inv_scale = 1/σ²_e`) from the
     /// sparse design matrices and the sparse `G⁻¹` blocks (already divided by
-    /// their variance).
+    /// their variance). For repeated assembly with the same model, build a
+    /// [`SparseMmeStructure`] once instead.
     pub fn assemble(
         x: &CsMat<f64>,
         z_blocks: &[CsMat<f64>],
@@ -168,117 +378,36 @@ impl SparseMixedModelEquations {
         r_inv_scale: f64,
         g_inv_blocks: &[CsMat<f64>],
     ) -> Self {
-        let n = y.len();
-        let p = x.cols();
-        let q_vec: Vec<usize> = z_blocks.iter().map(|z| z.cols()).collect();
-        let dim = p + q_vec.iter().sum::<usize>();
-
-        // Row access to W = [X Z_1 ... Z_r]
-        let x_csr = x.to_csr();
-        let z_csr: Vec<CsMat<f64>> = z_blocks.iter().map(|z| z.to_csr()).collect();
-        let mut offsets = Vec::with_capacity(z_blocks.len());
-        let mut off = p;
-        for q in &q_vec {
-            offsets.push(off);
-            off += q;
-        }
-
-        // W'W / σ²_e = Σ_i w_i w_i' / σ²_e, one observation at a time
-        let mut builder = TripletBuilder::new(dim, dim);
-        let mut row: Vec<(usize, f64)> = Vec::new();
-        for i in 0..n {
-            row.clear();
-            if let Some(r) = x_csr.outer_view(i) {
-                for (c, v) in r.iter() {
-                    row.push((c, *v));
-                }
-            }
-            for (k, z) in z_csr.iter().enumerate() {
-                if let Some(r) = z.outer_view(i) {
-                    for (c, v) in r.iter() {
-                        row.push((offsets[k] + c, *v));
-                    }
-                }
-            }
-            for (a, (ca, va)) in row.iter().enumerate() {
-                builder.add(*ca, *ca, va * va * r_inv_scale);
-                for (cb, vb) in row.iter().skip(a + 1) {
-                    builder.add_symmetric(*ca, *cb, va * vb * r_inv_scale);
-                }
-            }
-        }
-        // + G⁻¹ blocks
-        for (k, ginv) in g_inv_blocks.iter().enumerate() {
-            for (v, (i, j)) in ginv.iter() {
-                builder.add(offsets[k] + i, offsets[k] + j, *v);
-            }
-        }
-        let coeff_matrix = builder.to_csc();
-
-        // RHS: W'y / σ²_e
-        let mut rhs = vec![0.0; dim];
-        for (j, v) in xt_y(x, y).iter().enumerate() {
-            rhs[j] = v * r_inv_scale;
-        }
-        for (k, z) in z_blocks.iter().enumerate() {
-            for (j, v) in xt_y(z, y).iter().enumerate() {
-                rhs[offsets[k] + j] = v * r_inv_scale;
-            }
-        }
-
-        Self {
-            coeff_matrix,
-            rhs,
-            n_fixed: p,
-            n_random: q_vec,
-            dim,
-        }
+        let blocks: Vec<Option<&CsMat<f64>>> = g_inv_blocks.iter().map(Some).collect();
+        let mut mme = SparseMmeStructure::new(x, z_blocks, y, &blocks)
+            .assemble(r_inv_scale, &vec![1.0; g_inv_blocks.len()]);
+        mme.analysis = None;
+        mme
     }
 
-    /// Solve the MME with the sparse Cholesky solver and compute the inverse
-    /// subset, the fixed-effect columns of `C⁻¹` and `log|C|`.
+    /// Solve the MME with the sparse Cholesky solver. `log|C|` is computed
+    /// here; the inverse entries are computed when first requested.
     pub fn solve(&self) -> Result<MmeSolution> {
-        let solver = SparseCholeskySolver::new(&self.coeff_matrix)?;
+        let solver = match &self.analysis {
+            Some(cell) => match cell.get() {
+                Some(analysis) => analysis.factorize(&self.coeff_matrix)?,
+                None => {
+                    let solver = SparseCholeskySolver::new(&self.coeff_matrix)?;
+                    let _ = cell.set(Arc::clone(solver.analysis()));
+                    solver
+                }
+            },
+            None => SparseCholeskySolver::new(&self.coeff_matrix)?,
+        };
         let solution = solver.solve(&self.rhs)?;
         let log_det_c = solver.log_determinant();
-        let subset = solver.inverse_subset();
-
-        let p = self.n_fixed;
-        let mut fixed_cols = DMatrix::zeros(self.dim, p);
-        let mut e = vec![0.0; self.dim];
-        for j in 0..p {
-            e[j] = 1.0;
-            let col = solver.solve(&e)?;
-            e[j] = 0.0;
-            for i in 0..self.dim {
-                fixed_cols[(i, j)] = col[i];
-            }
-        }
-
-        let c_inv_diag: Vec<f64> = (0..self.dim)
-            .map(|i| subset.get(i, i).copied().unwrap_or(0.0))
-            .collect();
-
-        let fixed_effects = solution[..p].to_vec();
-        let mut random_effects = Vec::new();
-        let mut offset = p;
-        for &q in &self.n_random {
-            random_effects.push(solution[offset..offset + q].to_vec());
-            offset += q;
-        }
-
-        Ok(MmeSolution {
+        Ok(MmeSolution::new(
             solution,
-            fixed_effects,
-            random_effects,
+            self.n_fixed,
+            &self.n_random,
             log_det_c,
-            c_inv_diag,
-            c_inv: Some(MmeInverse::Sparse {
-                subset,
-                solver: Arc::new(solver),
-                fixed_cols,
-            }),
-        })
+            Some(MmeInverse::sparse(Arc::new(solver), self.n_fixed)),
+        ))
     }
 }
 
@@ -424,37 +553,24 @@ impl MixedModelEquations {
         let sol = chol.solve(&rhs_vec);
         let sol_vec: Vec<f64> = sol.as_slice().to_vec();
 
-        // Extract fixed effects
-        let fixed_effects = sol_vec[..self.n_fixed].to_vec();
-
-        // Extract random effects per term
-        let mut random_effects = Vec::new();
-        let mut offset = self.n_fixed;
-        for &q in &self.n_random {
-            random_effects.push(sol_vec[offset..offset + q].to_vec());
-            offset += q;
-        }
-
         // Compute log|C| = 2 * sum(log(diag(L)))
         let l = chol.l();
         let log_det_c = 2.0 * (0..self.dim).map(|i| l[(i, i)].ln()).sum::<f64>();
 
         // Full dense C^{-1}
         let c_inv = chol.inverse();
-        let c_inv_diag: Vec<f64> = (0..self.dim).map(|i| c_inv[(i, i)]).collect();
-
-        Ok(MmeSolution {
-            solution: sol_vec,
-            fixed_effects,
-            random_effects,
+        Ok(MmeSolution::new(
+            sol_vec,
+            self.n_fixed,
+            &self.n_random,
             log_det_c,
-            c_inv_diag,
-            c_inv: Some(MmeInverse::Dense(c_inv)),
-        })
+            Some(MmeInverse::Dense(c_inv)),
+        ))
     }
 }
 
 /// Solution of the Mixed Model Equations.
+#[derive(Debug)]
 pub struct MmeSolution {
     /// Full solution vector [b; u1; u2; ...].
     pub solution: Vec<f64>,
@@ -464,14 +580,48 @@ pub struct MmeSolution {
     pub random_effects: Vec<Vec<f64>>,
     /// Log-determinant of the coefficient matrix: log|C|.
     pub log_det_c: f64,
-    /// Diagonal of C^{-1} (for standard errors and trace computations).
-    pub c_inv_diag: Vec<f64>,
-    /// `C^{-1}` (dense, or a sparse inverse subset with the factorization);
-    /// None if not computed.
+    /// `C^{-1}` (dense, or the sparse factorization with lazily computed
+    /// inverse entries); None if not computed.
     pub c_inv: Option<MmeInverse>,
+    c_inv_diag: OnceLock<Vec<f64>>,
 }
 
 impl MmeSolution {
+    /// A solution vector split into fixed and per-term random effects.
+    pub fn new(
+        solution: Vec<f64>,
+        n_fixed: usize,
+        n_random: &[usize],
+        log_det_c: f64,
+        c_inv: Option<MmeInverse>,
+    ) -> Self {
+        let fixed_effects = solution[..n_fixed].to_vec();
+        let mut random_effects = Vec::with_capacity(n_random.len());
+        let mut offset = n_fixed;
+        for &q in n_random {
+            random_effects.push(solution[offset..offset + q].to_vec());
+            offset += q;
+        }
+        Self {
+            solution,
+            fixed_effects,
+            random_effects,
+            log_det_c,
+            c_inv,
+            c_inv_diag: OnceLock::new(),
+        }
+    }
+
+    /// Diagonal of `C⁻¹` (standard errors, EM traces); computed on first use.
+    pub fn c_inv_diag(&self) -> &[f64] {
+        self.c_inv_diag.get_or_init(|| {
+            self.c_inv
+                .as_ref()
+                .map(|c| c.diagonal())
+                .unwrap_or_default()
+        })
+    }
+
     /// The inverse, or an error if it was not computed.
     pub fn inverse(&self) -> Result<&MmeInverse> {
         self.c_inv
@@ -797,7 +947,7 @@ mod tests {
         let ss = sparse.solve().unwrap();
         for i in 0..dense.dim {
             assert_relative_eq!(ss.solution[i], ds.solution[i], epsilon = 1e-10);
-            assert_relative_eq!(ss.c_inv_diag[i], ds.c_inv_diag[i], epsilon = 1e-10);
+            assert_relative_eq!(ss.c_inv_diag()[i], ds.c_inv_diag()[i], epsilon = 1e-10);
         }
         assert_relative_eq!(ss.log_det_c, ds.log_det_c, epsilon = 1e-10);
 

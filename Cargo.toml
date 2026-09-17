@@ -17,8 +17,8 @@ authors = ["Jakob"]
 [workspace.dependencies]
 # Core math
 nalgebra = "0.35"
-# Sparse Cholesky (faer)
-faer = "0.20"
+# Sparse Cholesky (faer); multithreading is enabled per target in crates/core
+faer = { version = "0.24", default-features = false, features = ["std", "sparse-linalg"] }
 # Sparse matrices
 sprs = "0.11"
 # Data I/O

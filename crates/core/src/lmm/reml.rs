@@ -2,7 +2,7 @@ use crate::error::{LmmError, Result};
 use crate::matrix::sparse::spmv;
 use crate::model::MixedModel;
 
-use super::mme::SparseMixedModelEquations;
+use super::mme::{SparseMixedModelEquations, SparseMmeStructure};
 use super::result::{FitResult, NamedEffect, RandomEffectBlock, RemlIteration, VarianceEstimate};
 
 /// REML engine using EM algorithm for variance component estimation.
@@ -67,6 +67,9 @@ impl EmReml {
             }
         }
 
+        // Pattern, ordering and symbolic factorization are shared by all
+        // iterations.
+        let structure = SparseMmeStructure::for_model(model);
         let mut history = Vec::new();
         let mut converged = false;
 
@@ -77,28 +80,8 @@ impl EmReml {
             }
             model.residual_var_struct.set_params(&[sigma2_e])?;
 
-            // Build G^{-1} blocks: G_k^{-1} = K_k^{-1} / sigma^2_k
-            let g_inv_blocks: Vec<sprs::CsMat<f64>> = (0..n_random_terms)
-                .map(|k| {
-                    let q = model.z_blocks[k].cols();
-                    if let Some(ref ginv_k) = model.ginv_matrices[k] {
-                        ginv_k.map(|v| v / sigma2_random[k])
-                    } else {
-                        crate::matrix::sparse::sparse_diagonal(&vec![1.0 / sigma2_random[k]; q])
-                    }
-                })
-                .collect();
-
-            let r_inv_scale = 1.0 / sigma2_e;
-
-            // Assemble and solve MME
-            let mme = SparseMixedModelEquations::assemble(
-                &model.x,
-                &model.z_blocks,
-                &model.y,
-                r_inv_scale,
-                &g_inv_blocks,
-            );
+            // Assemble (G_k^{-1} = K_k^{-1} / sigma^2_k) and solve the MME
+            let mme = assemble(&structure, &sigma2_random, sigma2_e);
 
             let sol = mme.solve()?;
 
@@ -159,7 +142,7 @@ impl EmReml {
                     c_inv.trace_block(ginv_k, block_start)
                 } else {
                     // K = I, so tr(C^{-1}_{uu}) = sum of diagonal
-                    sol.c_inv_diag[block_start..block_start + q_k]
+                    sol.c_inv_diag()[block_start..block_start + q_k]
                         .iter()
                         .sum::<f64>()
                 };
@@ -228,25 +211,7 @@ impl EmReml {
         }
         model.residual_var_struct.set_params(&[sigma2_e])?;
 
-        let g_inv_blocks: Vec<sprs::CsMat<f64>> = (0..n_random_terms)
-            .map(|k| {
-                let q = model.z_blocks[k].cols();
-                if let Some(ref ginv_k) = model.ginv_matrices[k] {
-                    ginv_k.map(|v| v / sigma2_random[k])
-                } else {
-                    crate::matrix::sparse::sparse_diagonal(&vec![1.0 / sigma2_random[k]; q])
-                }
-            })
-            .collect();
-
-        let r_inv_scale = 1.0 / sigma2_e;
-        let mme = SparseMixedModelEquations::assemble(
-            &model.x,
-            &model.z_blocks,
-            &model.y,
-            r_inv_scale,
-            &g_inv_blocks,
-        );
+        let mme = assemble(&structure, &sigma2_random, sigma2_e);
         let sol = mme.solve()?;
 
         let mut var_params: Vec<f64> = sigma2_random.clone();
@@ -323,7 +288,7 @@ impl EmReml {
                 term: label.term.clone(),
                 level: label.level.clone(),
                 estimate: sol.fixed_effects[i],
-                se: sol.c_inv_diag[i].sqrt(),
+                se: sol.c_inv_diag()[i].sqrt(),
             })
             .collect();
 
@@ -338,7 +303,7 @@ impl EmReml {
                     term: model.random_term_names[k].clone(),
                     level: level_name.clone(),
                     estimate: sol.random_effects[k][j],
-                    se: sol.c_inv_diag[block_offset + j].sqrt(),
+                    se: sol.c_inv_diag()[block_offset + j].sqrt(),
                 })
                 .collect();
             random_effects.push(RandomEffectBlock {
@@ -389,4 +354,14 @@ impl EmReml {
             n_random_per_term: model.z_blocks.iter().map(|z| z.cols()).collect(),
         })
     }
+}
+
+/// The MME at `σ²_k = sigma2_random[k]`, `σ²_e = sigma2_e`.
+fn assemble(
+    structure: &SparseMmeStructure,
+    sigma2_random: &[f64],
+    sigma2_e: f64,
+) -> SparseMixedModelEquations {
+    let scales: Vec<f64> = sigma2_random.iter().map(|s| 1.0 / s).collect();
+    structure.assemble(1.0 / sigma2_e, &scales)
 }

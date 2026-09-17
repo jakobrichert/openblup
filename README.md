@@ -25,9 +25,9 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 ## Features
 
 ### Core Engine
-- **AI-REML** (Average Information) with exact REML scores, a likelihood safeguard and EM burn-in/fallback; parameters that reach zero are fixed at the boundary and reported as such (like ASReml's `B`)
+- **AI-REML** (Average Information) with exact REML scores, a likelihood safeguard and EM fallback; parameters that reach zero are fixed at the boundary and reported as such (like ASReml's `B`)
 - **General multi-parameter REML engine**: any combination of the variance structures below, for random terms, `outer:inner` interaction terms (`Σ_outer ⊗ Σ_inner`, optionally with a pedigree inner factor) and the residual, all validated against dense reference likelihoods and numerical gradients
-- **Henderson's Mixed Model Equations** (MME): sparse assembly, sparse Cholesky (faer, AMD ordering) and a Takahashi inverse subset for the traces, prediction error variances and leverages REML needs; dense assembly for structured residuals
+- **Henderson's Mixed Model Equations** (MME): sparse assembly on a fixed pattern, a multithreaded supernodal sparse Cholesky (faer, AMD ordering, symbolic analysis shared by all iterations) and a supernodal selected inversion (Takahashi) for the traces, prediction error variances and leverages REML needs, computed only when they are used; dense assembly for structured residuals
 - **BLUP/BLUE** extraction with standard errors, reliabilities and the full fixed-effects covariance matrix
 - **Treatment contrasts** for factors (`mu + rep` is full rank, like R's `model.matrix`)
 - **Wald F-tests** for fixed effects using the full covariance block, with containment, Satterthwaite or Kenward-Roger (bias-adjusted F, matched denominator df) degrees of freedom
@@ -90,7 +90,7 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 - Browser demo page in `crates/wasm/www`
 
 ### Current limitations (honest status)
-- Models with an IID residual (animal, genomic and plant-trial models) assemble the MME **sparsely** and solve them with a sparse Cholesky factorization (fill-reducing ordering) plus a Takahashi inverse subset, so the number of equations is limited by memory for the factor rather than by a dense inverse. Models with structured residuals or dense variance structures (AR1 x AR1 residuals, FA / unstructured terms) use the general engine, which assembles and inverts `C` densely; keep those to a few thousand equations.
+- Models with an IID residual (animal, genomic and plant-trial models) assemble the MME **sparsely** and solve them with a supernodal sparse Cholesky factorization plus a selected inversion, so the number of equations is limited by the fill-in of the factor rather than by a dense inverse (see [Performance](#performance)). Models with structured residuals or dense variance structures (AR1 x AR1 residuals, FA / unstructured terms) use the general engine, which assembles and inverts `C` densely; keep those to a few thousand equations.
 - The `gpu` feature compiles a backend *interface* only; all computation runs on the CPU until a `wgpu` backend is contributed.
 - The dedicated multi-trait engine (`MultiTraitReml`) uses EM-REML. For AI-REML with standard errors and the full diagnostics, fit multi-trait models through the general structures instead: stack the records in long format (one row per trait x unit) and use `trait:animal` with `US(trait) ⊗ A` plus a `US(trait) ⊗ I` residual over the (trait, unit) grid (see the CLI and Python quick starts). The residual of that route is assembled densely, so keep it to a few thousand records.
 - Satterthwaite denominator df need the average-information matrix, so they are available after an AI-REML fit with no variance parameter on the boundary (any variance structure). Kenward-Roger additionally needs scaled-identity / relationship-matrix terms and an IID residual. Unavailable methods fall back to the next simpler one (the output says which). Leverage-based residual diagnostics need an IID residual.
@@ -301,6 +301,27 @@ with structures `idv` (default), `ar1`/`ar1(rho)`, `ar1c` (correlation only), `d
 (e.g. `--random "env:diag*animal" --pedigree ped.csv --pedigree-term animal`).
 Run `openblup fit --help` for all options (`--algorithm em`, `--max-iter`, `--tolerance`, ...).
 
+## Performance
+
+Models with an IID residual (animal, genomic and plant-trial models) run on the sparse path: the MME pattern and its fill-reducing ordering are analysed once per fit, every AI-REML iteration is one multithreaded supernodal Cholesky factorization plus one selected inversion, and likelihood-only evaluations skip the inversion. Pedigree animal models, `y = sex + animal`, fitted to convergence with AI-REML (`animal_model_benchmark` example, Apple M5 Pro):
+
+| Animals | Records | Pedigree structure | Fit | Iterations |
+|---:|---:|---|---:|---:|
+| 20 000 | 18 000 | 2% of each generation used as sires | 0.12 s | 5 |
+| 60 000 | 54 000 | 2% of each generation used as sires | 0.46 s | 5 |
+| 100 000 | 90 000 | 2% of each generation used as sires | 1.0 s | 5 |
+| 20 000 | 18 000 | random mating (no structure, much more fill-in) | 3.3 s | 5 |
+| 60 000 | 54 000 | random mating | 52 s | 5 |
+
+The cost is set by the fill-in of the Cholesky factor, i.e. by the pedigree structure, more than by the number of animals: the densest block of the factor (the top separator) is factorized and inverted densely in every iteration. Reproduce with
+
+```bash
+cargo run --release -p plant-breeding-lmm-core --example animal_model_benchmark -- 20000 60000 100000
+cargo run --release -p plant-breeding-lmm-core --example animal_model_benchmark -- --mating random 20000
+```
+
+Models on the general engine (structured residuals, FA / unstructured terms) still assemble `C` densely: a 40 x 80 AR1 x AR1 field trial takes about a minute and a 500-genotype FA1 MET about a minute and a half (see [Current limitations](#current-limitations-honest-status)).
+
 ## Building
 
 ```bash
@@ -312,6 +333,9 @@ cargo test --workspace
 
 # Large-scale check (4 000-animal pedigree model) — ignored by default, run in release mode
 cargo test --release -p plant-breeding-lmm-core --test sparse_mme_test -- --ignored
+
+# Scaling benchmark of the sparse animal-model path (see Performance)
+cargo run --release -p plant-breeding-lmm-core --example animal_model_benchmark -- 5000 20000 60000
 
 # Lints used in CI
 cargo fmt --all -- --check
@@ -409,13 +433,13 @@ The algorithms implemented here are based on well-established quantitative genet
 | Spatial (AR1xAR1) | Yes | Yes | No | **Yes** |
 | Multi-trait | Yes | Yes | Yes | **Yes** (AI-REML via `US ⊗ A`; EM-REML wide-format engine) |
 | Factor analytic | Yes | Limited | No | **Yes** |
-| Sparse solver | Yes | No | Yes | **Yes** (sparse Cholesky + Takahashi inverse subset; dense for structured residuals) |
+| Sparse solver | Yes | No | Yes | **Yes** (supernodal multithreaded Cholesky + selected inversion; dense for structured residuals) |
 | Python API | No | No | No | **Yes (PyO3)** |
 | CLI tool | Yes | No | No | **Yes** |
 | Wald tests | Yes | Yes | Yes | **Yes** |
 | Runs in the browser (WebAssembly) | No | No | No | **Yes** ([Studio](https://jakobrichert.github.io/openblup/)) |
 | Memory safe | No | N/A | Yes (GC) | **Yes (ownership)** |
-| Performance | Excellent | Slow | Good | **Good for small/medium problems (see limitations)** |
+| Performance | Excellent | Slow | Good | **Sparse models: tens of thousands of animals in seconds ([Performance](#performance)); structured residuals: small/medium problems** |
 
 ## Contributing
 
