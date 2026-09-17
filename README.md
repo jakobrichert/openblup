@@ -6,95 +6,38 @@
 
 ![OpenBLUP Studio fitting an AR1 x AR1 spatial model to a field trial](docs/images/studio-field.png)
 
-## Why This Project?
+## Why OpenBLUP?
 
-**The breeding community deserves modern, open tools.**
-
-For decades, variance component estimation and breeding value prediction in genetics have depended on [ASReml](https://vsni.co.uk/software/asreml), a proprietary Fortran-based tool. While ASReml is an excellent piece of software that has powered thousands of research papers, its closed-source nature and Fortran codebase create real barriers:
-
-- **No transparency**: Researchers cannot inspect, audit, or modify the algorithms they depend on for scientific conclusions.
-- **No extensibility**: Adding new variance structures, integrating with modern ML pipelines, or embedding in larger systems is impossible without vendor support.
-- **Fortran lock-in**: The Fortran ecosystem lacks modern tooling (package managers, CI/CD, cross-compilation, WebAssembly targets). Maintaining and extending Fortran code requires increasingly rare expertise.
-- **Licence costs**: ASReml licences are expensive, creating inequity between well-funded programs and breeding efforts in developing countries where genetic gain matters most.
-- **Reproducibility**: Closed-source software is a weak link in reproducible science. When the solver is a black box, "reproducing" a result means "having the same licence."
-
-Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=sommer) in R, [MixedModels.jl](https://github.com/JuliaStats/MixedModels.jl) in Julia), but none combine ASReml's full feature set (pedigree BLUP, genomic BLUP, spatial models, multi-trait, factor analytic structures) with the performance needed for national-scale evaluations.
-
-**This project aims to change that** by implementing the core algorithms from scratch in Rust — a language with C-level performance, memory safety without garbage collection, and first-class tooling — and exposing them through an ergonomic Python API.
+Variance component estimation and breeding value prediction have long depended on [ASReml](https://vsni.co.uk/software/asreml), an excellent but closed, licensed tool. Open alternatives such as [sommer](https://cran.r-project.org/package=sommer) (R) and [MixedModels.jl](https://github.com/JuliaStats/MixedModels.jl) (Julia) cover parts of that ground. OpenBLUP implements the breeding toolbox (AI-REML, pedigree and genomic relationship matrices, spatial and factor-analytic models, multi-trait models) from scratch in Rust, so that the algorithms can be inspected, tested against published examples, embedded in other software and run anywhere, from a Python notebook to a browser tab.
 
 ## Features
 
-### Core Engine
-- **AI-REML** (Average Information) with exact REML scores, a likelihood safeguard and EM fallback; parameters that reach zero are fixed at the boundary and reported as such (like ASReml's `B`)
-- **General multi-parameter REML engine**: any combination of the variance structures below, for random terms, `outer:inner` interaction terms (`Σ_outer ⊗ Σ_inner`, optionally with a pedigree inner factor) and the residual, all validated against dense reference likelihoods and numerical gradients
-- **Henderson's Mixed Model Equations** (MME): sparse assembly on a fixed pattern, a multithreaded supernodal sparse Cholesky (faer, AMD ordering, symbolic analysis shared by all iterations) and a supernodal selected inversion (Takahashi) for the traces, prediction error variances and leverages REML needs, computed only when they are used; dense assembly for structured residuals
-- **BLUP/BLUE** extraction with standard errors, reliabilities and the full fixed-effects covariance matrix
-- **Treatment contrasts** for factors (`mu + rep` is full rank, like R's `model.matrix`)
-- **Wald F-tests** for fixed effects using the full covariance block, with containment, Satterthwaite or Kenward-Roger (bias-adjusted F, matched denominator df) degrees of freedom
-- **Diagnostics**: log-likelihood, AIC, BIC, convergence monitoring, residual diagnostics
-- **Missing data**: `NA`/empty fields in CSV files become `NaN`; rows with a missing response (and, in the CLI and Studio, a missing covariate) are dropped, and a missing value anywhere else in the model is an error rather than a silent `NaN` fit
+**Estimation**
+- **AI-REML** (Average Information) with exact REML scores, a likelihood safeguard and EM fallback; EM-REML as an alternative. Parameters that reach zero are fixed at the boundary and flagged (like ASReml's `B`)
+- A **general multi-parameter engine** for any combination of the variance structures below, in random terms, `outer:inner` interactions (`Σ_outer ⊗ Σ_inner`, optionally with a pedigree inner factor) and the residual, validated against dense reference likelihoods and numerical gradients
+- **Sparse mixed model equations**: fixed-pattern assembly, a multithreaded supernodal Cholesky (faer) and a supernodal selected inversion for the traces, prediction error variances and leverages REML needs (see [Performance](#performance))
+- BLUEs and BLUPs with standard errors and reliabilities, the full fixed-effects covariance, treatment contrasts (`mu + rep` is full rank, like R's `model.matrix`)
+- **Wald F-tests** with containment, Satterthwaite or Kenward-Roger degrees of freedom; log-likelihood, AIC, BIC, residual diagnostics (leverages, Cook's distance)
+- Missing data: `NA`/empty CSV fields become `NaN`; rows with a missing response are dropped, a missing value anywhere else in the model is an error
 
-### Pedigree BLUP (Animal Model)
-- Pedigree parsing and validation (CSV, programmatic)
-- Henderson's A-inverse with Meuwissen & Luo (1992) inbreeding
-- Topological sort for correct pedigree ordering
-- Animals without records (ancestors) get breeding values — the random term follows the pedigree ordering, not the data
-- Validated against Mrode (2005) Example 3.1, through the raw MME *and* through the public builder API
+**Variance structures**
+- Identity, diagonal, unstructured (Cholesky parameterised), factor analytic (FA1, FA2, ... with a Woodbury inverse), AR1 as a variance (`ar1`) or correlation (`ar1c`), known matrices (e.g. a pedigree A-inverse)
+- Kronecker products: AR1 x AR1 spatial residuals over a row x column grid (missing plots allowed), FA x genotype or pedigree for G×E, `US(trait) ⊗ A` for multi-trait animal models
+- Every parameter is reported with its standard error from the inverse average-information matrix and a boundary flag
 
-### Genomic BLUP (GBLUP)
-- VanRaden Method 1 (2008) G-matrix construction
-- G-matrix blending with A22 (Misztal et al. 2010)
-- Single-step H-inverse (Legarra et al. 2009, Aguilar et al. 2010)
-- Full A-matrix computation and A22 extraction
+**Genetics**
+- Pedigree parsing, validation and sorting; Henderson's A-inverse with Meuwissen & Luo (1992) inbreeding; ancestors without records get breeding values. Validated against Mrode (2005) Example 3.1
+- Genomic relationships: VanRaden (2008) G, blending with A22, single-step H-inverse (Legarra et al. 2009, Aguilar et al. 2010)
+- Multi-trait models (long format through the general engine, or the wide-format EM-REML engine), genetic correlations, eigenvalue bending
+- RR-BLUP marker effects with exact REML (EMMA-style), Smith-Hazel, restricted and desired-gains selection indices
+- k-fold, stratified and leave-one-out cross-validation (accuracy, bias, MSEP)
 
-### Spatial & Variance Structures
-- **AR1** (first-order autoregressive) with closed-form tridiagonal inverse, as a variance (`ar1`) or a correlation-only (`ar1c`) structure
-- **Kronecker product** for separable models: AR1 x AR1 spatial residuals over a row x column grid (missing plots allowed), FA x genotype/pedigree for genotype-by-environment
-- **Diagonal** (heterogeneous variances)
-- **Unstructured** covariance (Cholesky parameterized); `US(trait) ⊗ A` and `US(trait) ⊗ I` give multi-trait animal models in long format
-- **Factor analytic** (FA1, FA2, ...) with Woodbury inverse (Smith et al. 2001)
-- **Identity** (IID random effects) and **known** (fixed) matrices such as a pedigree A-inverse
-- Every parameter (variances, correlations, loadings, specific variances) is reported with its standard error from the inverse average-information matrix and a boundary flag
-
-### Multi-trait Models
-- Kronecker-structured MME for correlated traits
-- EM-REML for trait covariance estimation (G0, R0)
-- Genetic correlation estimation
-- Positive-definiteness enforcement via eigenvalue bending
-
-### Selection Indices, Marker Models, Cross-Validation
-- Smith-Hazel, restricted (Kempthorne & Nordskog) and desired-gains (Pesek & Baker) indices
-- RR-BLUP marker effect model with exact REML (profiled likelihood over an eigendecomposition, as in EMMA/rrBLUP), solved in whichever of the individual or marker spaces is smaller
-- k-fold, stratified and leave-one-out cross-validation with prediction accuracy, bias and MSEP
-
-### Python Package (`openblup`)
-- `MixedModel`, `Pedigree`, `FitResult` with numpy, scipy.sparse and pandas interop
-- Structured terms (`add_random(..., structure="ar1")`, `add_random_interaction("env", "genotype", "fa1")`, `set_residual_interaction("row", "col")`), Satterthwaite Wald tests, residual diagnostics and k-fold cross-validation
-- Full type stubs for IDE autocompletion
-- Install with `pip install .` (maturin)
-
-### CLI Tool (`openblup`)
-- `openblup fit` — fit models from CSV; term specs such as `--random "env:fa1*genotype"` and `--residual "row:ar1*col:ar1c"`, `--ddf satterthwaite|kenward-roger`, `--cv K`, `--diagnostics`, text or JSON output, BLUP export to CSV
-- `openblup ainverse` — compute, inspect and export the A-inverse and inbreeding coefficients
-
-### OpenBLUP Studio (browser app)
-- The complete engine compiled to WebAssembly (`crates/studio`), running in a Web Worker
-- Point-and-click model builder with the CLI's term vocabulary, built-in example analyses, CSV and pedigree upload
-- Variance components, BLUEs and Wald tests, ranked BLUPs / EBVs, residual diagnostics, spatial field maps, FA genetic correlations and reaction norms, convergence and cross-validation views
-- Interactive 3D: the REML likelihood landscape with the optimizer path, the spatial field trend, the pedigree and G×E reaction norms, with PNG export and 1080p clip recording
-- Shows every model as the equivalent CLI command and Python code; see [OpenBLUP Studio](#openblup-studio) below
-
-### WebAssembly Target
-- Self-contained `openblup-wasm` crate (no rayon, no faer, no file I/O) with `wasm-bindgen` exports
-- JSON API for A-inverse (with inbreeding), single-random-term EM-REML and the G-matrix
-- Browser demo page in `crates/wasm/www`
-
-### Current limitations (honest status)
-- Models with an IID residual (animal, genomic and plant-trial models) assemble the MME **sparsely** and solve them with a supernodal sparse Cholesky factorization plus a selected inversion, so the number of equations is limited by the fill-in of the factor rather than by a dense inverse (see [Performance](#performance)). Models with structured residuals or dense variance structures (AR1 x AR1 residuals, FA / unstructured terms) use the general engine, which assembles and inverts `C` densely; keep those to a few thousand equations.
-- The `gpu` feature compiles a backend *interface* only; all computation runs on the CPU until a `wgpu` backend is contributed.
-- The dedicated multi-trait engine (`MultiTraitReml`) uses EM-REML. For AI-REML with standard errors and the full diagnostics, fit multi-trait models through the general structures instead: stack the records in long format (one row per trait x unit) and use `trait:animal` with `US(trait) ⊗ A` plus a `US(trait) ⊗ I` residual over the (trait, unit) grid (see the CLI and Python quick starts). The residual of that route is assembled densely, so keep it to a few thousand records.
-- Satterthwaite denominator df need the average-information matrix, so they are available after an AI-REML fit with no variance parameter on the boundary (any variance structure). Kenward-Roger additionally needs scaled-identity / relationship-matrix terms and an IID residual. Unavailable methods fall back to the next simpler one (the output says which). Leverage-based residual diagnostics need an IID residual.
-- `--cv` / `cross_validate()` handle models with a single random term (genomic or pedigree prediction).
+**Interfaces**
+- **Rust** library (`plant-breeding-lmm-core`) with a builder API
+- **Python** package `openblup` (PyO3): numpy, scipy.sparse and pandas interop, type stubs
+- **CLI** `openblup fit` / `openblup ainverse`: term specs such as `--random "env:fa1*genotype"` and `--residual "row:ar1*col:ar1c"`, text or JSON output, BLUP export
+- **[OpenBLUP Studio](#openblup-studio)**: the whole engine compiled to WebAssembly, in the browser
+- A small standalone WebAssembly crate (`crates/wasm`) with a JSON API for the A-inverse, single-term EM-REML and the G-matrix
 
 ## OpenBLUP Studio
 
@@ -117,9 +60,11 @@ The **3D** tab renders the fit itself, not decoration:
 
 Multi-environment trials also get 3D genotype-by-environment reaction norms. Every 3D view can be exported as a PNG or recorded as a 1080p clip of one full orbit.
 
+- Runs the engine in a Web Worker; your data never leave the machine
 - Start from one of the built-in analyses (spatial field trial, multi-environment trial, pedigree animal model, RCBD) or drop in your own CSV and pedigree
 - Pick the response, fixed effects, random terms with a variance structure per factor (`idv`, `diag`, `us`, `fa1`–`fa3`, `ar1`, `ar1c`), interactions, a pedigree term and an IID, AR1 x AR1 or custom residual
-- Every chart has a table view, and results export to JSON (BLUPs to CSV)
+- Variance components, BLUEs and Wald tests, ranked BLUPs / EBVs, residual diagnostics, field maps, FA genetic correlations, convergence and cross-validation views
+- Every model is shown as the equivalent CLI command and Python code; every chart has a table view, and results export to JSON (BLUPs to CSV)
 
 Run it locally:
 
@@ -194,7 +139,9 @@ model.add_random("genotype")
 result = model.fit()
 print(result.summary())
 print(result.variance_components())           # {'genotype': ..., 'residual': ...}
-print(result.wald_tests())
+print(result.wald_tests(ddf="kenward-roger")) # or "containment", "satterthwaite"
+print(result.residual_diagnostics()["cooks_distance"])
+print(model.cross_validate(n_folds=5, seed=1)["accuracy"])
 
 # Animal model with a pedigree relationship matrix
 ped = Pedigree.from_csv("examples/animal_pedigree.csv")
@@ -227,19 +174,6 @@ model.add_fixed("mu + rep")
 model.add_random("genotype")
 model.set_residual_interaction("row", "col", "ar1", "ar1c")
 print(model.fit().summary())
-
-# Satterthwaite df, residual diagnostics and cross-validation
-model = MixedModel()
-model.load_csv("examples/field_trial.csv")
-model.as_factor("rep")
-model.set_response("yield")
-model.add_fixed("mu + rep")
-model.add_random("genotype")
-result = model.fit()
-print(result.wald_tests(ddf="satterthwaite"))
-print(result.wald_tests(ddf="kenward-roger"))
-print(result.residual_diagnostics()["cooks_distance"])
-print(model.cross_validate(n_folds=5, seed=1)["accuracy"])
 
 # Multi-trait animal model in long format (one row per trait x animal; `unit` = animal id):
 # genetic covariance G0 (x) A, residual covariance R0 (x) I
@@ -320,12 +254,12 @@ cargo run --release -p plant-breeding-lmm-core --example animal_model_benchmark 
 cargo run --release -p plant-breeding-lmm-core --example animal_model_benchmark -- --mating random 20000
 ```
 
-Models on the general engine (structured residuals, FA / unstructured terms) still assemble `C` densely: a 40 x 80 AR1 x AR1 field trial takes about a minute and a 500-genotype FA1 MET about a minute and a half (see [Current limitations](#current-limitations-honest-status)).
+Models on the general engine (structured residuals, FA / unstructured terms) still assemble `C` densely: a 40 x 80 AR1 x AR1 field trial takes about a minute and a 500-genotype FA1 MET about a minute and a half. Making that engine sparse is next on the [roadmap](#status-and-roadmap).
 
 ## Building
 
 ```bash
-# Requires Rust 1.70+ (CI runs stable on Linux, macOS and Windows)
+# Requires Rust 1.84+ (CI runs stable on Linux, macOS and Windows)
 cargo build --release
 
 # Run all Rust tests (core unit tests, integration tests, CLI end-to-end tests, wasm crate)
@@ -335,7 +269,7 @@ cargo test --workspace
 cargo test --release -p plant-breeding-lmm-core --test sparse_mme_test -- --ignored
 
 # Scaling benchmark of the sparse animal-model path (see Performance)
-cargo run --release -p plant-breeding-lmm-core --example animal_model_benchmark -- 5000 20000 60000
+cargo run --release -p plant-breeding-lmm-core --example animal_model_benchmark
 
 # Lints used in CI
 cargo fmt --all -- --check
@@ -349,7 +283,7 @@ pip install maturin numpy scipy
 maturin develop --release
 python -m pytest python/tests
 
-# Build the WebAssembly demo
+# Build the small WebAssembly crate and its demo page (Studio: see above)
 rustup target add wasm32-unknown-unknown
 cargo install wasm-pack
 wasm-pack build crates/wasm --target web --out-dir www/pkg
@@ -361,11 +295,11 @@ python3 -m http.server --directory crates/wasm/www   # then open http://localhos
 ```
 openblup/
 ├── crates/
-│   ├── core/                 # Pure Rust library (plant-breeding-lmm-core)
+│   ├── core/                 # Pure Rust library (plant-breeding-lmm-core), examples/ incl. the benchmark
 │   │   ├── data/             # DataFrame, Factor columns, CSV I/O (NA handling)
-│   │   ├── matrix/           # Sparse ops, dense helpers, faer Cholesky, sparse inverse
+│   │   ├── matrix/           # Sparse ops, supernodal Cholesky + selected inversion, dense helpers
 │   │   ├── model/            # Builder API, design matrices (treatment contrasts), multi-trait
-│   │   ├── lmm/              # MME, AI-REML, EM-REML, BLUP utilities, structured R
+│   │   ├── lmm/              # MME, AI-REML, EM-REML, general engine, BLUP utilities
 │   │   ├── variance/         # AR1, Diagonal, Unstructured, Kronecker, Factor Analytic
 │   │   ├── genetics/         # Pedigree, A/G/H matrices, RR-BLUP, selection indices
 │   │   ├── diagnostics/      # Wald tests, Satterthwaite df, residuals, cross-validation
@@ -380,7 +314,7 @@ openblup/
 │   └── tests/                # Python test suite
 ├── examples/                 # Example data (field trials, MET trial, Mrode and simulated pedigrees)
 ├── docs/images/              # Screenshots
-└── .github/workflows/        # CI: fmt, clippy, tests, wasm, Python on 3 platforms; Studio build + Pages deploy
+└── .github/workflows/        # CI: fmt, clippy, tests on 3 platforms, wasm, Python, benchmark; Studio build + Pages deploy
 ```
 
 ## Algorithms & References
@@ -393,7 +327,7 @@ The algorithms implemented here are based on well-established quantitative genet
 - **Searle, S.R., Casella, G. & McCulloch, C.E.** (1992). *Variance Components*. Wiley. — Comprehensive treatment of variance component estimation.
 - **Gilmour, A.R., Thompson, R. & Cullis, B.R.** (1995). Average Information REML: An efficient algorithm for variance parameter estimation in linear mixed models. *Biometrics*, 51(4), 1440-1450. — AI-REML algorithm used in ASReml.
 - **Kenward, M.G. & Roger, J.H.** (1997). Small sample inference for fixed effects from restricted maximum likelihood. *Biometrics*, 53(3), 983-997. — Bias-adjusted covariance, scaled F and denominator df; Satterthwaite df follow Giesbrecht & Burns (1985) and Fai & Cornelius (1996) for multi-df terms.
-- **Takahashi, K., Fagan, J. & Chin, M.-S.** (1973). Formation of a sparse bus impedance matrix and its application to short circuit study. *Proc. 8th PICA Conference*, 63-69. — The sparse inverse subset used for the traces and prediction error variances.
+- **Takahashi, K., Fagan, J. & Chin, M.-S.** (1973). Formation of a sparse bus impedance matrix and its application to short circuit study. *Proc. 8th PICA Conference*, 63-69. — The recurrences behind the selected inversion used for the traces and prediction error variances (here in supernodal form, as in Masuda, Baba & Suzuki 2014, *Journal of Animal Breeding and Genetics*).
 
 ### Pedigree & Relationship Matrices
 - **Henderson, C.R.** (1976). A simple method for computing the inverse of a numerator relationship matrix used in prediction of breeding values. *Biometrics*, 32(1), 69-83. — Henderson's rules for A-inverse.
@@ -422,44 +356,40 @@ The algorithms implemented here are based on well-established quantitative genet
 
 ## Comparison with Existing Tools
 
-| Feature | ASReml | sommer (R) | MixedModels.jl | **OpenBLUP** |
-|---------|--------|------------|-----------------|----------------------|
-| Language | Fortran | R | Julia | **Rust + Python** |
-| Open source | No | Yes | Yes | **Yes** |
-| AI-REML | Yes | No | No | **Yes** |
-| Pedigree BLUP | Yes | Yes | No | **Yes** |
-| Genomic BLUP | Yes | Yes | No | **Yes** |
-| Single-step (H) | Yes | Yes | No | **Yes** |
-| Spatial (AR1xAR1) | Yes | Yes | No | **Yes** |
-| Multi-trait | Yes | Yes | Yes | **Yes** (AI-REML via `US ⊗ A`; EM-REML wide-format engine) |
-| Factor analytic | Yes | Limited | No | **Yes** |
-| Sparse solver | Yes | No | Yes | **Yes** (supernodal multithreaded Cholesky + selected inversion; dense for structured residuals) |
-| Python API | No | No | No | **Yes (PyO3)** |
-| CLI tool | Yes | No | No | **Yes** |
-| Wald tests | Yes | Yes | Yes | **Yes** |
-| Runs in the browser (WebAssembly) | No | No | No | **Yes** ([Studio](https://jakobrichert.github.io/openblup/)) |
-| Memory safe | No | N/A | Yes (GC) | **Yes (ownership)** |
-| Performance | Excellent | Slow | Good | **Sparse models: tens of thousands of animals in seconds ([Performance](#performance)); structured residuals: small/medium problems** |
+| | ASReml | sommer (R) | MixedModels.jl | **OpenBLUP** |
+|---|---|---|---|---|
+| Open source | No | Yes | Yes | **Yes** (MIT / Apache-2.0) |
+| Implementation | Fortran | R / C++ | Julia | **Rust** |
+| Interfaces | R, standalone | R | Julia | **Rust, Python, CLI, browser** |
+| AI-REML | Yes | Yes | No | **Yes** |
+| Pedigree and genomic relationship matrices | Yes | Yes | No | **Yes** (A-inverse, G, single-step H) |
+| AR1 x AR1 spatial models | Yes | Yes | No | **Yes** |
+| Factor analytic G×E | Yes | Limited | No | **Yes** |
+| Runs in the browser | No | No | No | **Yes** ([Studio](https://jakobrichert.github.io/openblup/)) |
+
+ASReml remains the reference for speed on large structured models; see [Performance](#performance) for where OpenBLUP stands.
+
+## Status and roadmap
+
+What works well today, and what is missing:
+
+- **Sparse path (done).** Models with an IID residual (animal, genomic and plant-trial models) use sparse MME, a supernodal Cholesky and a selected inversion; tens of thousands of animals fit in seconds.
+- **Next: a sparse general engine.** Models with structured residuals or dense variance structures (AR1 x AR1 residuals, FA / unstructured terms) use the general engine, which assembles and inverts `C` densely; keep those to a few thousand equations for now. The plan is to give them the same sparse treatment (sparse `R⁻¹` for AR1 x AR1 and long-format multi-trait residuals, sparse Kronecker blocks, the shared supernodal factorization), so large spatial and MET analyses scale like the animal model does.
+- **Later: very large evaluations.** Beyond what a direct factorization handles (millions of equations): iterative (PCG) solutions and Monte-Carlo REML traces, so no inverse is needed at all, and nested-dissection orderings for less fill-in.
+- **Known gaps.**
+  - The wide-format multi-trait engine (`MultiTraitReml`) is EM-only; fit multi-trait models in long format through the general engine (`trait:us*animal` with a `trait:us*unit:fixed` residual, see the quick starts) for AI-REML, standard errors and diagnostics. That residual is dense, so keep it to a few thousand records.
+  - Satterthwaite df need the average-information matrix with no parameter on the boundary; Kenward-Roger also needs scaled-identity / relationship-matrix terms and an IID residual; leverage diagnostics need an IID residual. Unavailable methods fall back to the next simpler one, and the output says which.
+  - When a variance parameter sits at zero, the general engine reports no standard errors.
+  - `--cv` / `cross_validate()` handle a single random term.
+  - The `gpu` feature is an interface only; everything runs on the CPU.
+
+[CONTRIBUTING.md](CONTRIBUTING.md#where-to-help) lists these as places to help.
 
 ## Contributing
 
-Contributions are welcome! See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the full guide, including:
+Contributions are welcome, from code to validation reports. See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the development setup, conventions (standard quantitative-genetics notation), testing requirements (new algorithms must be validated against a textbook or another tool) and the pull request process.
 
-- How to set up your development environment
-- Code style and naming conventions (follows standard QG notation)
-- Testing requirements (all new algorithms must be validated)
-- Pull request process and templates
-
-**Areas where help is especially valuable:**
-
-| Area | What's Needed |
-|------|---------------|
-| **Validation** | Run the same model in OpenBLUP + ASReml/sommer, compare variance components and BLUPs |
-| **Sparse general engine** | Extend the sparse Cholesky / Takahashi path (used today for IID-residual models) to structured residuals and FA / unstructured terms |
-| **Tutorials** | Worked examples from real breeding programs (dairy, wheat, maize, forestry) |
-| **GPU backends** | wgpu compute shader implementations behind the existing `gpu` feature interface |
-
-Even if you don't write code — validation reports, bug reports, and feature requests are extremely valuable. See our [issue templates](.github/ISSUE_TEMPLATE/).
+The most valuable help right now: **validation** (the same model in OpenBLUP and ASReml or sommer, compared), the **sparse general engine**, and **tutorials** from real breeding programs (dairy, wheat, maize, forestry). Bug reports and feature requests go through the [issue templates](.github/ISSUE_TEMPLATE/).
 
 ## Licence
 
