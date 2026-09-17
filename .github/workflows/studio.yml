@@ -36,6 +36,14 @@ jobs:
         run: studio/build.sh
       - name: Smoke test
         run: node studio/tests/smoke.mjs
+      - name: Browser tests
+        run: |
+          npm install --prefix studio/tests --no-save --no-package-lock playwright-core@1.63
+          node studio/tests/node_modules/playwright-core/cli.js install --with-deps chromium
+          python3 -m http.server 8765 --directory studio --bind 127.0.0.1 > /dev/null 2>&1 &
+          sleep 1
+          node studio/tests/e2e.mjs
+          rm -rf studio/tests/node_modules
       - name: Upload site
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v5

@@ -218,19 +218,27 @@ export function mount3D(root, fitState, view) {
     try {
       let surface = null;
       if (view.scene === "likelihood") {
-        const fit = fitState.result.fit;
-        const perEval = Math.max(1, fitState.ms / Math.max(1, fit.n_iterations + 1));
-        const n = Math.max(11, Math.min(41, Math.round(Math.sqrt(2200 / perEval))));
-        status.textContent = `Evaluating the REML likelihood on a ${n} × ${n} grid…`;
-        const t0 = performance.now();
-        surface = await likelihoodSurface(fitState.request, {
-          theta: params.map((p) => p.value),
-          se: params.map((p) => p.se),
-          params: [view.pa, view.pb],
-          n,
-          path: fit.history.map((it) => it.variance_params),
-        });
-        surface.ms = performance.now() - t0;
+        // One computation per parameter pair: switching back is instant and
+        // quick back-and-forth does not queue repeat jobs in the engine.
+        const key = `${view.pa}:${view.pb}`;
+        view.surfaces ??= new Map();
+        if (!view.surfaces.has(key)) {
+          const fit = fitState.result.fit;
+          const perEval = Math.max(1, fitState.ms / Math.max(1, fit.n_iterations + 1));
+          const n = Math.max(11, Math.min(41, Math.round(Math.sqrt(2200 / perEval))));
+          const t0 = performance.now();
+          const job = likelihoodSurface(fitState.request, {
+            theta: params.map((p) => p.value),
+            se: params.map((p) => p.se),
+            params: [view.pa, view.pb],
+            n,
+            path: fit.history.map((it) => it.variance_params),
+          }).then((res) => ({ ...res, ms: performance.now() - t0 }));
+          job.catch(() => view.surfaces.delete(key));
+          view.surfaces.set(key, job);
+          status.textContent = `Evaluating the REML likelihood on a ${n} × ${n} grid…`;
+        }
+        surface = await view.surfaces.get(key);
         if (my !== token || disposed) return;
       }
       const opts = {
