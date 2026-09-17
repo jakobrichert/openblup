@@ -77,8 +77,15 @@ pub fn build_fixed_design(
                 drop_first.push(drop);
             }
             FixedTerm::Covariate(col_name) => {
-                // Validate column exists
-                df.get_float(col_name)?;
+                let values = df.get_float(col_name)?;
+                if let Some(pos) = values.iter().position(|v| !v.is_finite()) {
+                    return Err(LmmError::Data(format!(
+                        "Covariate '{}' has a missing or non-finite value at row {}; \
+                         remove such rows first (see DataFrame::drop_missing)",
+                        col_name,
+                        pos + 1
+                    )));
+                }
                 labels.push(FixedEffectLabel {
                     term: col_name.clone(),
                     level: "covariate".to_string(),
@@ -430,6 +437,23 @@ mod tests {
         // X'X must be non-singular (full column rank).
         let xtx = crate::matrix::sparse::xtx_dense(&x);
         assert!(xtx.cholesky().is_some(), "X'X should be positive definite");
+    }
+
+    #[test]
+    fn test_build_fixed_covariate_with_missing_value_errors() {
+        let mut df = sample_df();
+        df.add_float_column("moisture", vec![12.0, f64::NAN, 11.5, 13.0])
+            .unwrap();
+        let terms = vec![
+            FixedTerm::Intercept,
+            FixedTerm::Covariate("moisture".to_string()),
+        ];
+        let err = build_fixed_design(&df, &terms).unwrap_err().to_string();
+        assert!(err.contains("moisture") && err.contains("row 2"), "{}", err);
+
+        let clean = df.drop_missing("moisture").unwrap();
+        let (x, _) = build_fixed_design(&clean, &terms).unwrap();
+        assert_eq!(x.rows(), 3);
     }
 
     #[test]

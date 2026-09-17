@@ -178,10 +178,10 @@ impl FitSpec {
 
     /// Prepare the data and build the model.
     ///
-    /// Rows with a missing response are dropped, `factors` and every column
-    /// used by a random or residual term are converted to factors, and the
-    /// pedigree (already validated and sorted) is attached to the pedigree
-    /// term. What was done is reported in [`PreparedModel::notes`].
+    /// Rows with a missing response or a missing numeric fixed covariate are
+    /// dropped, `factors` and every column used by a random or residual term
+    /// are converted to factors, and the pedigree (already validated and
+    /// sorted) is attached to the pedigree term. What was done is reported in [`PreparedModel::notes`].
     pub fn prepare(&self, data: &DataFrame, pedigree: Option<&Pedigree>) -> Result<PreparedModel> {
         let mut notes = Vec::new();
         let mut df = data.clone();
@@ -203,9 +203,26 @@ impl FitSpec {
                 df.nrows()
             ));
         }
+        // Rows with a missing numeric covariate cannot be used either.
+        for col in self.fixed.split('+').map(str::trim) {
+            let is_intercept = matches!(col.to_lowercase().as_str(), "" | "mu" | "intercept" | "1");
+            if is_intercept || self.factors.iter().any(|f| f == col) {
+                continue;
+            }
+            if df.has_missing(col).unwrap_or(false) {
+                let before = df.nrows();
+                df = df.drop_missing(col)?;
+                notes.push(format!(
+                    "Dropped {} rows with missing '{}' ({} remain)",
+                    before - df.nrows(),
+                    col,
+                    df.nrows()
+                ));
+            }
+        }
         if df.nrows() == 0 {
             return Err(LmmError::ModelSpec(
-                "No observations with a non-missing response".into(),
+                "No observations with a non-missing response and covariates".into(),
             ));
         }
 
@@ -395,7 +412,8 @@ impl FitSpec {
 pub struct PreparedModel {
     /// The model, ready to fit.
     pub model: MixedModel,
-    /// The data the model was built from (missing responses dropped, term
+    /// The data the model was built from (rows with missing responses or
+    /// covariates dropped, term
     /// columns converted to factors), row-aligned with the model.
     pub data: DataFrame,
     /// Parsed random terms, in model order.
@@ -440,6 +458,23 @@ mod tests {
         assert_eq!(prepared.model.y.len(), 6);
         assert!(prepared.notes[0].contains("Dropped 1 rows"));
         assert!(prepared.data.get_factor("rep").is_ok());
+    }
+
+    #[test]
+    fn prepare_drops_rows_with_missing_covariates() {
+        let csv = "genotype,rep,moisture,yield\nG1,1,12.1,10\nG2,1,NA,8\nG3,1,11.8,6\n\
+                   G1,2,12.4,12\nG2,2,12.0,10\nG3,2,11.9,8\nG1,3,12.2,NA\nG2,3,12.6,9\n";
+        let data = DataFrame::from_csv_reader(csv.as_bytes()).unwrap();
+        let mut spec = FitSpec::new("yield");
+        spec.fixed = "mu + rep + moisture".into();
+        spec.factors = vec!["rep".into()];
+        spec.random = vec!["genotype".into()];
+        let mut prepared = spec.prepare(&data, None).unwrap();
+        assert_eq!(prepared.data.nrows(), 6);
+        assert_eq!(prepared.model.y.len(), 6);
+        assert!(prepared.notes[1].contains("Dropped 1 rows with missing 'moisture'"));
+        let fit = prepared.model.fit_reml().unwrap();
+        assert!(fit.log_likelihood.is_finite());
     }
 
     #[test]

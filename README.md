@@ -32,7 +32,7 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 - **Treatment contrasts** for factors (`mu + rep` is full rank, like R's `model.matrix`)
 - **Wald F-tests** for fixed effects using the full covariance block, with containment, Satterthwaite or Kenward-Roger (bias-adjusted F, matched denominator df) degrees of freedom
 - **Diagnostics**: log-likelihood, AIC, BIC, convergence monitoring, residual diagnostics
-- **Missing data**: `NA`/empty fields in CSV files become `NaN`; rows with a missing response are dropped
+- **Missing data**: `NA`/empty fields in CSV files become `NaN`; rows with a missing response (and, in the CLI and Studio, a missing covariate) are dropped, and a missing value anywhere else in the model is an error rather than a silent `NaN` fit
 
 ### Pedigree BLUP (Animal Model)
 - Pedigree parsing and validation (CSV, programmatic)

@@ -172,6 +172,14 @@ impl<'a> MultiTraitModelBuilder<'a> {
                     context: format!("Trait '{}' length", trait_name),
                 });
             }
+            if let Some(pos) = trait_y.iter().position(|v| !v.is_finite()) {
+                return Err(LmmError::Data(format!(
+                    "Trait '{}' has a missing or non-finite value at row {}; \
+                     remove such rows first (see DataFrame::drop_missing)",
+                    trait_name,
+                    pos + 1
+                )));
+            }
             y.extend_from_slice(trait_y);
         }
 
@@ -328,6 +336,23 @@ mod tests {
         assert_eq!(model.z_single_blocks[0].cols(), 3);
         assert_eq!(model.g0.nrows(), 2);
         assert_eq!(model.r0.nrows(), 2);
+    }
+
+    #[test]
+    fn test_mt_builder_missing_trait_value_errors() {
+        let mut df = sample_mt_df();
+        df.add_float_column("protein", vec![11.0, 12.0, f64::NAN, 10.5, 11.2, 12.4])
+            .unwrap();
+        let err = MultiTraitModelBuilder::new()
+            .data(&df)
+            .traits(&["yield", "protein"])
+            .fixed("rep")
+            .random("genotype", None)
+            .build()
+            .err()
+            .expect("a missing trait value must be rejected")
+            .to_string();
+        assert!(err.contains("protein") && err.contains("row 3"), "{}", err);
     }
 
     #[test]
