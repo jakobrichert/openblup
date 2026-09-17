@@ -67,6 +67,27 @@ jobs:
           cargo run -q -p plant-breeding-lmm-cli -- ainverse \
             --pedigree examples/mrode_pedigree.csv --inbreeding
 
+  benchmark:
+    name: Sparse benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Reports the scaling of the sparse animal-model path in the job
+      # summary (shared runners are too noisy to gate on timings).
+      - name: Animal-model scaling benchmark (release)
+        run: |
+          {
+            echo "## Sparse animal-model benchmark"
+            echo
+            echo "Runner: $(nproc) cores"
+            echo
+            cargo run --release -q -p plant-breeding-lmm-core --example animal_model_benchmark -- 5000 20000 60000
+            echo
+            cargo run --release -q -p plant-breeding-lmm-core --example animal_model_benchmark -- --mating random 5000 20000
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
   wasm:
     name: WebAssembly
     runs-on: ubuntu-latest

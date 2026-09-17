@@ -13,7 +13,7 @@ use crate::matrix::sparse_cholesky::SparseCholeskySolver;
 /// Entries of `A⁻¹` on the pattern of the Cholesky factor of the SPD matrix
 /// `A` (symmetric, both triangles stored, sorted CSC).
 pub fn sparse_inverse_subset(a: &CsMat<f64>) -> Result<CsMat<f64>> {
-    Ok(SparseCholeskySolver::new(a)?.inverse_subset())
+    Ok(SparseCholeskySolver::new(a)?.inverse_subset().to_sparse())
 }
 
 /// Diagonal of `A⁻¹` for the SPD matrix `A`.

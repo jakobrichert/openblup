@@ -20,8 +20,8 @@
 //! ```
 
 use crate::error::{LmmError, Result};
-use crate::lmm::SparseMixedModelEquations;
-use crate::matrix::sparse::{sparse_diagonal, spmv};
+use crate::lmm::SparseMmeStructure;
+use crate::matrix::sparse::spmv;
 
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
@@ -248,25 +248,13 @@ impl CrossValidator {
         let mut sigma2_g = init_var;
         let mut sigma2_e = init_var;
 
+        let structure =
+            SparseMmeStructure::new(&x_train, std::slice::from_ref(&z_train), &y_train, &[ginv]);
+
         // REML iteration (EM-REML for robustness in CV context)
         for _iter in 0..self.max_iter {
-            // Build G^{-1} block
-            let g_inv_block = if let Some(ginv_mat) = ginv {
-                ginv_mat.map(|v| v / sigma2_g)
-            } else {
-                sparse_diagonal(&vec![1.0 / sigma2_g; q])
-            };
-
-            let r_inv_scale = 1.0 / sigma2_e;
-
             // Assemble and solve MME
-            let mme = SparseMixedModelEquations::assemble(
-                &x_train,
-                std::slice::from_ref(&z_train),
-                &y_train,
-                r_inv_scale,
-                &[g_inv_block],
-            );
+            let mme = structure.assemble(1.0 / sigma2_e, &[1.0 / sigma2_g]);
             let sol = mme.solve()?;
 
             let c_inv = sol.inverse()?;
@@ -299,7 +287,7 @@ impl CrossValidator {
             let trace_term = if let Some(ginv_mat) = ginv {
                 c_inv.trace_block(ginv_mat, n_fixed_cols)
             } else {
-                sol.c_inv_diag[n_fixed_cols..n_fixed_cols + q]
+                sol.c_inv_diag()[n_fixed_cols..n_fixed_cols + q]
                     .iter()
                     .sum::<f64>()
             };
@@ -320,20 +308,7 @@ impl CrossValidator {
         }
 
         // Final solve with converged variances
-        let g_inv_block = if let Some(ginv_mat) = ginv {
-            ginv_mat.map(|v| v / sigma2_g)
-        } else {
-            sparse_diagonal(&vec![1.0 / sigma2_g; q])
-        };
-
-        let r_inv_scale = 1.0 / sigma2_e;
-        let mme = SparseMixedModelEquations::assemble(
-            &x_train,
-            std::slice::from_ref(&z_train),
-            &y_train,
-            r_inv_scale,
-            &[g_inv_block],
-        );
+        let mme = structure.assemble(1.0 / sigma2_e, &[1.0 / sigma2_g]);
         let sol = mme.solve()?;
 
         // Predict validation set: y_hat = X_val * b_hat + Z_val * u_hat

@@ -87,6 +87,10 @@ cargo test --workspace
 # default because it needs a release build to run in reasonable time
 cargo test --release -p plant-breeding-lmm-core --test sparse_mme_test -- --ignored
 
+# Scaling benchmark of the sparse path; run it before and after changes to
+# the sparse Cholesky, the MME assembly or the AI-REML loop
+cargo run --release -p plant-breeding-lmm-core --example animal_model_benchmark
+
 # Run a specific test
 cargo test -p plant-breeding-lmm-core test_mrode_example
 
