@@ -64,7 +64,7 @@ See [Where to Help](#where-to-help) for priority areas.
 
 ### Prerequisites
 
-- **Rust** 1.70 or later (`rustup update stable`)
+- **Rust** 1.84 or later (`rustup update stable`)
 - **Git**
 - (Optional) **Python 3.8+** and **maturin** for Python bindings
 - (Optional) **R** with `sommer` or `ASReml-R` for validation
@@ -265,7 +265,7 @@ refactor: extract common Kronecker assembly into shared function
 | Area | What's Needed | Skills |
 |------|---------------|--------|
 | **Validation** | Run same models in OpenBLUP + ASReml/sommer, compare results | R + breeding knowledge |
-| **Sparse general engine** | Structured residuals (AR1xAR1) and FA / unstructured terms are still assembled and inverted densely; extend the sparse Cholesky + Takahashi path to them for large MET and spatial analyses | Rust + sparse LA |
+| **Sparse general engine** (next on the roadmap) | Structured residuals (AR1xAR1) and FA / unstructured terms are still assembled and inverted densely; give them sparse `R⁻¹` / Kronecker assembly and the shared supernodal Cholesky + selected inversion (`CholeskyAnalysis`, `SparseMmeStructure`) so large MET and spatial analyses scale like the animal model | Rust + sparse LA |
 | **Sparse multi-trait** | `US(trait) ⊗ I` residuals are assembled densely, and the wide-format `MultiTraitReml` engine is EM-only; a sparse `R⁻¹` for long-format multi-trait models would lift the few-thousand-record limit | Rust + REML theory |
 
 ### Medium Priority
@@ -275,6 +275,7 @@ refactor: extract common Kronecker assembly into shared function
 | **Kenward-Roger for structured terms** | Kenward-Roger currently needs scaled-identity / relationship-matrix terms and an IID residual; extend the derivative matrices to AR1, FA and US structures | Rust + statistics |
 | **Standard errors at the boundary** | When a variance parameter is fixed at zero, the general engine reports no standard errors at all; invert the average information of the free parameters instead | Rust + REML theory |
 | **Cross-validation with several random terms** | `cross_validate()` / `--cv` handle a single random term | Rust |
+| **Very large evaluations** | Beyond a direct factorization: PCG solutions with Monte-Carlo REML traces, nested-dissection orderings | Rust + numerical LA |
 | **GPU backend** | `wgpu` compute shaders behind the existing `gpu` feature interface | Rust + GPU |
 | **Tutorials** | Worked examples: dairy, wheat, maize, forestry | Breeding + writing |
 | **Python API polish** | Richer result objects (pandas-first summaries, plotting helpers) | Python + PyO3 |
