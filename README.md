@@ -64,7 +64,7 @@ Open alternatives exist (e.g., [sommer](https://cran.r-project.org/package=somme
 
 ### Selection Indices, Marker Models, Cross-Validation
 - Smith-Hazel, restricted (Kempthorne & Nordskog) and desired-gains (Pesek & Baker) indices
-- RR-BLUP marker effect model with EM-REML
+- RR-BLUP marker effect model with exact REML (profiled likelihood over an eigendecomposition, as in EMMA/rrBLUP), solved in whichever of the individual or marker spaces is smaller
 - k-fold, stratified and leave-one-out cross-validation with prediction accuracy, bias and MSEP
 
 ### Python Package (`openblup`)
@@ -380,6 +380,8 @@ The algorithms implemented here are based on well-established quantitative genet
 ### Genomic Selection
 - **VanRaden, P.M.** (2008). Efficient methods to compute genomic predictions. *Journal of Dairy Science*, 91(11), 4414-4423. — G-matrix construction (Method 1).
 - **Legarra, A., Aguilar, I. & Misztal, I.** (2009). A relationship matrix including full pedigree and genomic information. *Journal of Dairy Science*, 92(9), 4656-4663. — Single-step H-matrix.
+- **Kang, H.M., Zaitlen, N.A., Wade, C.M., Kirby, A., Heckerman, D., Daly, M.J. & Eskin, E.** (2008). Efficient control of population structure in model organism association mapping. *Genetics*, 178(3), 1709-1723. — EMMA: REML over one variance ratio via an eigendecomposition (used for RR-BLUP).
+- **Endelman, J.B.** (2011). Ridge regression and other kernels for genomic selection with R package rrBLUP. *The Plant Genome*, 4(3), 250-255.
 - **Aguilar, I., Misztal, I., Johnson, D.L., Legarra, A., Tsuruta, S. & Lawlor, T.J.** (2010). Hot topic: A unified approach to utilize phenotypic, full pedigree, and genomic information for genetic evaluation of Holstein final score. *Journal of Dairy Science*, 93(2), 743-752.
 
 ### Spatial Analysis
