@@ -41,7 +41,7 @@ clap = { version = "4", features = ["derive"] }
 # WebAssembly
 wasm-bindgen = "0.2"
 # Random / testing
-rand = "0.8"
+rand = "0.10"
 approx = "0.5"
 # Indexing
 indexmap = "2"
